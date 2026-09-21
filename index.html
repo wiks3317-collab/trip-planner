@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>旅行行程規劃工具</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- 頂部列 -->
+  <header id="app-header">
+    <button id="menu-toggle-btn" class="icon-btn" title="行程選單">☰</button>
+    <div id="header-title">
+      <span id="header-trip-name">旅行行程規劃工具</span>
+    </div>
+    <div id="header-actions">
+      <span id="current-member-badge" class="hidden"></span>
+      <button id="share-btn" class="icon-btn hidden" title="分享此行程">🔗 分享</button>
+    </div>
+  </header>
+
+  <!-- 左側行程選單（抽屜） -->
+  <div id="menu-overlay" class="hidden"></div>
+  <aside id="trip-menu" class="hidden">
+    <div class="menu-header">
+      <h3>我的行程</h3>
+      <button id="menu-close-btn" class="icon-btn">✕</button>
+    </div>
+    <ul id="trip-list"></ul>
+    <button id="new-trip-btn" class="primary-btn full-width">＋ 建立新行程</button>
+    <div class="menu-footer">
+      <button id="join-trip-btn" class="secondary-btn full-width">用連結／代碼加入行程</button>
+    </div>
+  </aside>
+
+  <!-- 主要內容區 -->
+  <main id="app-root">
+    <div id="loading-screen">
+      <p>載入中...</p>
+    </div>
+  </main>
+
+  <!-- 通用 Modal 容器 -->
+  <div id="modal-overlay" class="hidden">
+    <div id="modal-box"></div>
+  </div>
+
+  <!-- Toast 提示 -->
+  <div id="toast-container"></div>
+
+  <script type="module" src="firebase-config.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

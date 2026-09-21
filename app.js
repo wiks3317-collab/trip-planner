@@ -1,0 +1,1412 @@
+// ============================================================
+// 旅行行程規劃工具 - app.js
+// 純前端 + Firebase Firestore（即時同步資料庫）
+// ============================================================
+
+import { db, auth, authReady } from "./firebase-config.js";
+import {
+  collection, doc, getDoc, getDocs, setDoc, addDoc, updateDoc, deleteDoc,
+  onSnapshot, query, orderBy, serverTimestamp, writeBatch,
+} from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+
+// ------------------------------------------------------------
+// 小工具
+// ------------------------------------------------------------
+function escapeHtml(str) {
+  if (str === null || str === undefined) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function newLocalId() {
+  return doc(collection(db, "_ids")).id;
+}
+
+function toast(msg) {
+  const container = document.getElementById("toast-container");
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.textContent = msg;
+  container.appendChild(el);
+  setTimeout(() => el.remove(), 2600);
+}
+
+function fmtMoney(cents) {
+  const v = Math.round(cents) / 100;
+  return v.toLocaleString("zh-Hant-TW", { maximumFractionDigits: 0 });
+}
+
+function fmtDateTime(ts) {
+  if (!ts) return "";
+  const d = ts.toDate ? ts.toDate() : new Date(ts);
+  return d.toLocaleString("zh-Hant-TW", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function todayStr() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+// ------------------------------------------------------------
+// localStorage 輔助（記住「我在這個裝置上是誰」與「我看過哪些行程」）
+// ------------------------------------------------------------
+const LS_MY_TRIPS = "tp_my_trips";       // [{id, name}]
+const LS_MEMBER_PREFIX = "tp_member_";   // tp_member_{tripId} = memberId
+
+function getMyTrips() {
+  try {
+    return JSON.parse(localStorage.getItem(LS_MY_TRIPS) || "[]");
+  } catch {
+    return [];
+  }
+}
+function saveMyTrip(id, name) {
+  const list = getMyTrips().filter((t) => t.id !== id);
+  list.unshift({ id, name });
+  localStorage.setItem(LS_MY_TRIPS, JSON.stringify(list.slice(0, 30)));
+}
+function updateMyTripName(id, name) {
+  const list = getMyTrips();
+  const item = list.find((t) => t.id === id);
+  if (item) {
+    item.name = name;
+    localStorage.setItem(LS_MY_TRIPS, JSON.stringify(list));
+  }
+}
+function removeMyTrip(id) {
+  localStorage.setItem(LS_MY_TRIPS, JSON.stringify(getMyTrips().filter((t) => t.id !== id)));
+}
+function getMyMemberId(tripId) {
+  return localStorage.getItem(LS_MEMBER_PREFIX + tripId) || null;
+}
+function setMyMemberId(tripId, memberId) {
+  if (memberId) localStorage.setItem(LS_MEMBER_PREFIX + tripId, memberId);
+  else localStorage.removeItem(LS_MEMBER_PREFIX + tripId);
+}
+
+// ------------------------------------------------------------
+// 全域狀態
+// ------------------------------------------------------------
+const state = {
+  tripId: null,
+  trip: null,          // { id, name, members:[{id,name,permission}], ... }
+  days: [],             // [{id, title, date, order, blocks}]
+  currentDayId: null,
+  spots: [],            // spots of currentDayId
+  currentSpotId: null,
+  currentSpot: null,
+  wishes: [],
+  expenses: [],
+  tripSection: "itinerary", // 'itinerary' | 'expenses'
+  unsub: {},             // active onSnapshot unsubscribe fns, keyed
+};
+
+function clearUnsub(key) {
+  if (state.unsub[key]) {
+    state.unsub[key]();
+    delete state.unsub[key];
+  }
+}
+function clearAllUnsub() {
+  Object.keys(state.unsub).forEach(clearUnsub);
+}
+
+function myMember() {
+  if (!state.trip) return null;
+  const id = getMyMemberId(state.tripId);
+  return state.trip.members.find((m) => m.id === id) || null;
+}
+function myPermission() {
+  const m = myMember();
+  return m ? m.permission : "viewer_unset"; // 尚未選擇身份 -> 視同唯讀
+}
+function canEditItinerary() {
+  const p = myPermission();
+  return p === "owner" || p === "editor";
+}
+function isOwner() {
+  return myPermission() === "owner";
+}
+
+// ------------------------------------------------------------
+// Modal 系統
+// ------------------------------------------------------------
+function openModal(titleHtml, bodyHtml) {
+  const overlay = document.getElementById("modal-overlay");
+  const box = document.getElementById("modal-box");
+  box.innerHTML = `<div class="modal-title">${titleHtml}</div>${bodyHtml}`;
+  overlay.classList.remove("hidden");
+}
+function closeModal() {
+  document.getElementById("modal-overlay").classList.add("hidden");
+  document.getElementById("modal-box").innerHTML = "";
+}
+document.getElementById("modal-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "modal-overlay") closeModal();
+});
+
+// ------------------------------------------------------------
+// 路由
+// ------------------------------------------------------------
+function navigate(hash) {
+  if (window.location.hash === hash) {
+    route();
+  } else {
+    window.location.hash = hash;
+  }
+}
+window.addEventListener("hashchange", route);
+
+function parseHash() {
+  // #/trip/TRIPID
+  // #/trip/TRIPID/day/DAYID
+  // #/trip/TRIPID/day/DAYID/spot/SPOTID
+  // #/trip/TRIPID/expenses
+  const h = window.location.hash.replace(/^#\/?/, "");
+  const parts = h.split("/").filter(Boolean);
+  const result = {};
+  if (parts[0] === "trip" && parts[1]) {
+    result.tripId = parts[1];
+    if (parts[2] === "day" && parts[3]) {
+      result.dayId = parts[3];
+      if (parts[4] === "spot" && parts[5]) {
+        result.spotId = parts[5];
+      }
+    } else if (parts[2] === "expenses") {
+      result.expenses = true;
+    }
+  }
+  return result;
+}
+
+async function route() {
+  const r = parseHash();
+  if (!r.tripId) {
+    clearAllUnsub();
+    state.tripId = null;
+    state.trip = null;
+    renderWelcome();
+    renderTripMenu();
+    updateHeader();
+    return;
+  }
+
+  if (state.tripId !== r.tripId) {
+    await loadTrip(r.tripId);
+  }
+
+  state.tripSection = r.expenses ? "expenses" : "itinerary";
+  state.currentDayId = r.dayId || state.currentDayId;
+  state.currentSpotId = r.spotId || null;
+
+  if (!state.trip) {
+    // 行程還在載入或不存在
+    return;
+  }
+
+  updateHeader();
+  renderTripMenu();
+
+  // 進站時若這個裝置在這個行程還沒選過身份，先強制選擇
+  const my = myMember();
+  if (!my && !sessionStorage.getItem("tp_skip_pick_" + r.tripId)) {
+    renderMemberPicker();
+    return;
+  }
+
+  if (state.tripSection === "expenses") {
+    subscribeExpenses();
+    renderExpensesPage();
+  } else if (r.spotId) {
+    subscribeSpot(r.dayId, r.spotId);
+  } else {
+    renderTripHome();
+  }
+}
+
+
+// ------------------------------------------------------------
+// Firestore：行程（trip）
+// ------------------------------------------------------------
+async function loadTrip(tripId) {
+  clearAllUnsub();
+  state.tripId = tripId;
+  state.trip = null;
+  state.days = [];
+  state.spots = [];
+  state.currentDayId = null;
+  state.currentSpotId = null;
+  renderLoading();
+
+  const tripRef = doc(db, "trips", tripId);
+  const snap = await getDoc(tripRef);
+  if (!snap.exists()) {
+    toast("找不到這個行程，連結可能有誤");
+    navigate("");
+    return;
+  }
+  state.trip = { id: tripId, ...snap.data() };
+  updateMyTripName(tripId, state.trip.name);
+
+  state.unsub.trip = onSnapshot(tripRef, (s) => {
+    if (!s.exists()) return;
+    state.trip = { id: tripId, ...s.data() };
+    updateMyTripName(tripId, state.trip.name);
+    updateHeader();
+    // 若目前畫面跟成員/權限有關，重新渲染目前頁面
+    route();
+  });
+
+  subscribeDays();
+}
+
+async function createTrip(name, members) {
+  const ref = await addDoc(collection(db, "trips"), {
+    name,
+    members,
+    createdAt: serverTimestamp(),
+  });
+  saveMyTrip(ref.id, name);
+  return ref.id;
+}
+
+async function updateTripMembers(members) {
+  await updateDoc(doc(db, "trips", state.tripId), { members });
+}
+
+async function renameTrip(name) {
+  await updateDoc(doc(db, "trips", state.tripId), { name });
+}
+
+// ------------------------------------------------------------
+// Firestore：天數（days）
+// ------------------------------------------------------------
+function subscribeDays() {
+  clearUnsub("days");
+  const q = query(collection(db, "trips", state.tripId, "days"), orderBy("order", "asc"));
+  state.unsub.days = onSnapshot(q, (snap) => {
+    state.days = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    if ((!state.currentDayId || !state.days.find((d) => d.id === state.currentDayId)) && state.days.length) {
+      state.currentDayId = state.days[0].id;
+    }
+    if (state.currentDayId) ensureSpotsSubscription(state.currentDayId);
+    if (state.tripSection === "itinerary" && !state.currentSpotId) {
+      renderTripHome();
+    } else if (state.currentSpotId) {
+      // 天數列表變動也可能影響麵包屑，重繪 spot 頁
+      renderSpotPage();
+    }
+  });
+}
+
+let spotsSubscribedDay = null;
+function ensureSpotsSubscription(dayId) {
+  if (spotsSubscribedDay === dayId) return;
+  spotsSubscribedDay = dayId;
+  state.spots = [];
+  subscribeSpots(dayId);
+}
+
+function selectDay(dayId) {
+  state.currentDayId = dayId;
+  state.currentSpotId = null;
+  ensureSpotsSubscription(dayId);
+  navigate(`#/trip/${state.tripId}/day/${dayId}`);
+}
+
+async function createDay(title, date) {
+  const order = state.days.length;
+  const ref = await addDoc(collection(db, "trips", state.tripId, "days"), {
+    title, date: date || "", order, blocks: [], createdAt: serverTimestamp(),
+  });
+  state.currentDayId = ref.id;
+  return ref.id;
+}
+async function updateDayMeta(dayId, data) {
+  await updateDoc(doc(db, "trips", state.tripId, "days", dayId), data);
+}
+async function updateDayBlocks(dayId, blocks) {
+  await updateDoc(doc(db, "trips", state.tripId, "days", dayId), { blocks });
+}
+async function deleteDay(dayId) {
+  // 連同底下景點一起刪除
+  const spotsSnap = await getDocs(collection(db, "trips", state.tripId, "days", dayId, "spots"));
+  const batch = writeBatch(db);
+  spotsSnap.docs.forEach((d) => batch.delete(d.ref));
+  batch.delete(doc(db, "trips", state.tripId, "days", dayId));
+  await batch.commit();
+}
+
+// ------------------------------------------------------------
+// Firestore：景點 / 時段（spots）
+// ------------------------------------------------------------
+function subscribeSpots(dayId) {
+  clearUnsub("spots");
+  const q = query(collection(db, "trips", state.tripId, "days", dayId, "spots"), orderBy("order", "asc"));
+  state.unsub.spots = onSnapshot(q, (snap) => {
+    state.spots = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    if (state.tripSection === "itinerary" && !state.currentSpotId) {
+      renderTripHome();
+    }
+  });
+}
+
+async function createSpot(dayId, title, time) {
+  const order = state.spots.length;
+  const ref = await addDoc(collection(db, "trips", state.tripId, "days", dayId, "spots"), {
+    title, time: time || "", order, blocks: [], createdAt: serverTimestamp(),
+  });
+  return ref.id;
+}
+async function updateSpotMeta(dayId, spotId, data) {
+  await updateDoc(doc(db, "trips", state.tripId, "days", dayId, "spots", spotId), data);
+}
+async function updateSpotBlocks(dayId, spotId, blocks) {
+  await updateDoc(doc(db, "trips", state.tripId, "days", dayId, "spots", spotId), { blocks });
+}
+async function deleteSpot(dayId, spotId) {
+  const wishesSnap = await getDocs(collection(db, "trips", state.tripId, "days", dayId, "spots", spotId, "wishes"));
+  const batch = writeBatch(db);
+  wishesSnap.docs.forEach((d) => batch.delete(d.ref));
+  batch.delete(doc(db, "trips", state.tripId, "days", dayId, "spots", spotId));
+  await batch.commit();
+}
+
+function subscribeSpot(dayId, spotId) {
+  clearUnsub("spot");
+  clearUnsub("wishes");
+  const spotRef = doc(db, "trips", state.tripId, "days", dayId, "spots", spotId);
+  state.unsub.spot = onSnapshot(spotRef, (s) => {
+    if (!s.exists()) {
+      toast("這個景點已被刪除");
+      navigate(`#/trip/${state.tripId}/day/${dayId}`);
+      return;
+    }
+    state.currentSpot = { id: s.id, ...s.data() };
+    renderSpotPage();
+  });
+  const wq = query(collection(db, "trips", state.tripId, "days", dayId, "spots", spotId, "wishes"), orderBy("createdAt", "desc"));
+  state.unsub.wishes = onSnapshot(wq, (snap) => {
+    state.wishes = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    renderSpotPage();
+  });
+}
+
+async function addWish(dayId, spotId, text) {
+  const m = myMember();
+  await addDoc(collection(db, "trips", state.tripId, "days", dayId, "spots", spotId, "wishes"), {
+    text,
+    authorId: m ? m.id : null,
+    authorName: m ? m.name : "匿名旅伴",
+    createdAt: serverTimestamp(),
+  });
+}
+async function deleteWish(dayId, spotId, wishId) {
+  await deleteDoc(doc(db, "trips", state.tripId, "days", dayId, "spots", spotId, "wishes", wishId));
+}
+
+// ------------------------------------------------------------
+// Firestore：記帳（expenses）
+// ------------------------------------------------------------
+function subscribeExpenses() {
+  clearUnsub("expenses");
+  const q = query(collection(db, "trips", state.tripId, "expenses"), orderBy("date", "asc"));
+  state.unsub.expenses = onSnapshot(q, (snap) => {
+    state.expenses = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    if (state.tripSection === "expenses") renderExpensesPage();
+  });
+}
+
+async function addExpense({ title, amountCents, payerId, splitWith, date, note }) {
+  await addDoc(collection(db, "trips", state.tripId, "expenses"), {
+    title, amountCents, payerId, splitWith, date, note: note || "",
+    createdAt: serverTimestamp(),
+  });
+}
+async function deleteExpense(expenseId) {
+  await deleteDoc(doc(db, "trips", state.tripId, "expenses", expenseId));
+}
+
+
+// ------------------------------------------------------------
+// Header / 選單
+// ------------------------------------------------------------
+function updateHeader() {
+  const nameEl = document.getElementById("header-trip-name");
+  const badge = document.getElementById("current-member-badge");
+  const shareBtn = document.getElementById("share-btn");
+  if (state.trip) {
+    nameEl.textContent = state.trip.name;
+    const m = myMember();
+    if (m) {
+      badge.textContent = `你是：${m.name}${m.permission === "viewer" ? "（唯讀）" : ""}`;
+      badge.classList.remove("hidden");
+    } else {
+      badge.classList.add("hidden");
+    }
+    shareBtn.classList.remove("hidden");
+  } else {
+    nameEl.textContent = "旅行行程規劃工具";
+    badge.classList.add("hidden");
+    shareBtn.classList.add("hidden");
+  }
+}
+
+document.getElementById("share-btn").addEventListener("click", () => {
+  const url = `${window.location.origin}${window.location.pathname}#/trip/${state.tripId}`;
+  if (navigator.share) {
+    navigator.share({ title: state.trip?.name || "旅行行程", url }).catch(() => {});
+  } else if (navigator.clipboard) {
+    navigator.clipboard.writeText(url).then(() => toast("連結已複製，傳給同行的人吧！"));
+  } else {
+    openModal("分享連結", `<div class="form-row"><input type="text" readonly value="${escapeHtml(url)}" onclick="this.select()"></div>`);
+  }
+});
+
+document.getElementById("menu-toggle-btn").addEventListener("click", () => {
+  document.getElementById("menu-overlay").classList.remove("hidden");
+  document.getElementById("trip-menu").classList.remove("hidden");
+});
+document.getElementById("menu-close-btn").addEventListener("click", closeMenu);
+document.getElementById("menu-overlay").addEventListener("click", closeMenu);
+function closeMenu() {
+  document.getElementById("menu-overlay").classList.add("hidden");
+  document.getElementById("trip-menu").classList.add("hidden");
+}
+
+function renderTripMenu() {
+  const manageBtn = document.getElementById("manage-members-menu-btn");
+  if (manageBtn) manageBtn.remove();
+  if (state.trip && isOwner()) {
+    const btn = document.createElement("button");
+    btn.id = "manage-members-menu-btn";
+    btn.className = "secondary-btn full-width";
+    btn.style.margin = "0 12px 12px";
+    btn.style.width = "calc(100% - 24px)";
+    btn.textContent = "👥 管理成員與權限";
+    btn.addEventListener("click", () => {
+      closeMenu();
+      renderManageMembersModal();
+    });
+    document.getElementById("new-trip-btn").insertAdjacentElement("beforebegin", btn);
+  }
+
+  const list = document.getElementById("trip-list");
+  const trips = getMyTrips();
+  if (!trips.length) {
+    list.innerHTML = `<li style="color:var(--text-muted);cursor:default;">還沒有任何行程</li>`;
+  } else {
+    list.innerHTML = trips.map((t) => `
+      <li class="${t.id === state.tripId ? "active" : ""}" data-tripid="${t.id}">
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(t.name)}</span>
+        <span class="icon-btn remove-trip-btn" data-tripid="${t.id}" title="從清單移除" style="font-size:14px;">✕</span>
+      </li>`).join("");
+    list.querySelectorAll("li[data-tripid]").forEach((li) => {
+      li.addEventListener("click", (e) => {
+        if (e.target.classList.contains("remove-trip-btn")) return;
+        navigate(`#/trip/${li.dataset.tripid}`);
+        closeMenu();
+      });
+    });
+    list.querySelectorAll(".remove-trip-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        removeMyTrip(btn.dataset.tripid);
+        renderTripMenu();
+      });
+    });
+  }
+}
+
+document.getElementById("new-trip-btn").addEventListener("click", () => {
+  closeMenu();
+  renderNewTripModal();
+});
+document.getElementById("join-trip-btn").addEventListener("click", () => {
+  closeMenu();
+  openModal("用連結／代碼加入行程", `
+    <div class="form-row">
+      <label>貼上同行人傳給你的連結，或行程代碼</label>
+      <input type="text" id="join-input" placeholder="https://.../#/trip/xxxxxx 或 xxxxxx">
+    </div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="join-cancel">取消</button>
+      <button class="primary-btn" id="join-confirm">加入</button>
+    </div>
+  `);
+  document.getElementById("join-cancel").onclick = closeModal;
+  document.getElementById("join-confirm").onclick = () => {
+    const raw = document.getElementById("join-input").value.trim();
+    if (!raw) return;
+    let tripId = raw;
+    const m = raw.match(/trip\/([a-zA-Z0-9]+)/);
+    if (m) tripId = m[1];
+    closeModal();
+    navigate(`#/trip/${tripId}`);
+  };
+});
+
+
+// ------------------------------------------------------------
+// 歡迎頁（尚未選擇行程）
+// ------------------------------------------------------------
+function renderWelcome() {
+  const root = document.getElementById("app-root");
+  const trips = getMyTrips();
+  root.innerHTML = `
+    <div class="card" style="text-align:center;padding:36px 20px;">
+      <h2 style="margin-top:0;">✈️ 旅行行程規劃工具</h2>
+      <p style="color:var(--text-muted);">建立一個新行程，或從左上角選單切換到你之前建立/加入過的行程。</p>
+      <button id="welcome-new-trip" class="primary-btn" style="margin-top:10px;">＋ 建立新行程</button>
+    </div>
+    ${trips.length ? `
+      <div class="section-title">你最近的行程</div>
+      ${trips.map((t) => `<div class="card spot-item" data-tripid="${t.id}"><span class="spot-title">${escapeHtml(t.name)}</span><span>›</span></div>`).join("")}
+    ` : ""}
+  `;
+  document.getElementById("welcome-new-trip").addEventListener("click", renderNewTripModal);
+  root.querySelectorAll("[data-tripid]").forEach((el) => {
+    el.addEventListener("click", () => navigate(`#/trip/${el.dataset.tripid}`));
+  });
+}
+
+function renderLoading() {
+  document.getElementById("app-root").innerHTML = `<div id="loading-screen"><p>載入中...</p></div>`;
+}
+
+// ------------------------------------------------------------
+// 建立新行程 Modal（含動態成員名單）
+// ------------------------------------------------------------
+function renderNewTripModal() {
+  let members = [
+    { localId: "m1", name: "", permission: "owner" },
+    { localId: "m2", name: "", permission: "editor" },
+  ];
+
+  function rowHtml(m, idx) {
+    return `
+      <div class="block-editor-row" data-row="${m.localId}">
+        <input type="text" placeholder="成員姓名 / 暱稱" value="${escapeHtml(m.name)}" data-field="name" data-row="${m.localId}" style="flex:1;min-width:120px;padding:8px;border:1px solid var(--border);border-radius:8px;">
+        <select data-field="permission" data-row="${m.localId}" style="padding:8px;border:1px solid var(--border);border-radius:8px;">
+          <option value="owner" ${m.permission === "owner" ? "selected" : ""}>統籌人（可編輯+管理成員）</option>
+          <option value="editor" ${m.permission === "editor" ? "selected" : ""}>可編輯行程</option>
+          <option value="viewer" ${m.permission === "viewer" ? "selected" : ""}>僅可瀏覽</option>
+        </select>
+        <button class="icon-btn remove-member-row" data-row="${m.localId}" ${members.length <= 1 ? "disabled" : ""}>✕</button>
+      </div>`;
+  }
+
+  function renderRows() {
+    const wrap = document.getElementById("new-trip-members");
+    wrap.innerHTML = members.map(rowHtml).join("");
+    wrap.querySelectorAll("input[data-field=name]").forEach((inp) => {
+      inp.addEventListener("input", () => {
+        const m = members.find((x) => x.localId === inp.dataset.row);
+        m.name = inp.value;
+      });
+    });
+    wrap.querySelectorAll("select[data-field=permission]").forEach((sel) => {
+      sel.addEventListener("change", () => {
+        const m = members.find((x) => x.localId === sel.dataset.row);
+        m.permission = sel.value;
+      });
+    });
+    wrap.querySelectorAll(".remove-member-row").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        members = members.filter((x) => x.localId !== btn.dataset.row);
+        renderRows();
+      });
+    });
+  }
+
+  openModal("建立新行程", `
+    <div class="form-row">
+      <label>行程名稱</label>
+      <input type="text" id="new-trip-name" placeholder="例如：東京六日遊">
+    </div>
+    <div class="form-row">
+      <label>同行成員與權限（之後隨時可以在「管理成員」調整）</label>
+      <div id="new-trip-members"></div>
+      <button class="secondary-btn small-btn" id="add-member-row-btn" style="margin-top:4px;">＋ 新增成員</button>
+    </div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="new-trip-cancel">取消</button>
+      <button class="primary-btn" id="new-trip-confirm">建立行程</button>
+    </div>
+  `);
+  renderRows();
+  document.getElementById("add-member-row-btn").addEventListener("click", () => {
+    members.push({ localId: "m" + (members.length + 1) + "_" + Date.now(), name: "", permission: "editor" });
+    renderRows();
+  });
+  document.getElementById("new-trip-cancel").onclick = closeModal;
+  document.getElementById("new-trip-confirm").onclick = async () => {
+    const name = document.getElementById("new-trip-name").value.trim();
+    const validMembers = members.filter((m) => m.name.trim());
+    if (!name) return toast("請輸入行程名稱");
+    if (!validMembers.length) return toast("至少要有一位成員");
+    const finalMembers = validMembers.map((m) => ({ id: newLocalId(), name: m.name.trim(), permission: m.permission }));
+    closeModal();
+    renderLoading();
+    const tripId = await createTrip(name, finalMembers);
+    navigate(`#/trip/${tripId}`);
+  };
+}
+
+// ------------------------------------------------------------
+// 選擇「我是誰」
+// ------------------------------------------------------------
+function renderMemberPicker() {
+  const root = document.getElementById("app-root");
+  const members = state.trip.members || [];
+  root.innerHTML = `
+    <div class="card">
+      <h3 style="margin-top:0;">你是「${escapeHtml(state.trip.name)}」的哪一位？</h3>
+      <p style="color:var(--text-muted);font-size:13px;">點選你的名字，這個瀏覽器之後就會記得你的身份。請不要選錯別人的名字喔！</p>
+      <div class="member-chip-picker">
+        ${members.map((m) => `
+          <button class="member-pick-btn" data-id="${m.id}">
+            <span>${escapeHtml(m.name)}</span>
+            <span class="perm-tag">${permLabel(m.permission)}</span>
+          </button>`).join("")}
+      </div>
+      <button class="secondary-btn full-width" id="skip-pick-btn" style="margin-top:14px;">先用唯讀模式瀏覽（不選身份）</button>
+    </div>
+  `;
+  root.querySelectorAll(".member-pick-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setMyMemberId(state.tripId, btn.dataset.id);
+      route();
+    });
+  });
+  document.getElementById("skip-pick-btn").addEventListener("click", () => {
+    sessionStorage.setItem("tp_skip_pick_" + state.tripId, "1");
+    route();
+  });
+}
+function permLabel(p) {
+  if (p === "owner") return "統籌人";
+  if (p === "editor") return "可編輯";
+  return "唯讀";
+}
+
+
+// ------------------------------------------------------------
+// 行程主頁（頂端 行程/記帳 分頁 + 天數 tabs + 當日內容）
+// ------------------------------------------------------------
+function renderTripHome() {
+  const root = document.getElementById("app-root");
+  const day = state.days.find((d) => d.id === state.currentDayId);
+
+  root.innerHTML = `
+    <div class="tabs">
+      <button class="tab-btn ${state.tripSection === "itinerary" ? "active" : ""}" id="tab-itinerary">📅 行程</button>
+      <button class="tab-btn ${state.tripSection === "expenses" ? "active" : ""}" id="tab-expenses">💰 記帳與分帳</button>
+    </div>
+    ${!canEditItinerary() ? `<div class="readonly-banner">你目前是唯讀身份，可以瀏覽行程、許願池留言與記帳，但無法新增或編輯行程內容。</div>` : ""}
+    <div class="day-tabs" id="day-tabs"></div>
+    <div id="day-content"></div>
+  `;
+
+  document.getElementById("tab-itinerary").onclick = () => navigate(`#/trip/${state.tripId}${state.currentDayId ? "/day/" + state.currentDayId : ""}`);
+  document.getElementById("tab-expenses").onclick = () => navigate(`#/trip/${state.tripId}/expenses`);
+
+  const dayTabsEl = document.getElementById("day-tabs");
+  dayTabsEl.innerHTML = state.days.map((d) => `
+    <button class="day-tab ${d.id === state.currentDayId ? "active" : ""}" data-dayid="${d.id}">${escapeHtml(d.title)}</button>
+  `).join("") + (canEditItinerary() ? `<button class="day-tab" id="add-day-tab">＋ 新增天數</button>` : "");
+  dayTabsEl.querySelectorAll("[data-dayid]").forEach((btn) => {
+    btn.addEventListener("click", () => selectDay(btn.dataset.dayid));
+  });
+  const addDayBtn = document.getElementById("add-day-tab");
+  if (addDayBtn) addDayBtn.addEventListener("click", renderAddDayModal);
+
+  const contentEl = document.getElementById("day-content");
+  if (!day) {
+    contentEl.innerHTML = `<div class="empty-hint">${canEditItinerary() ? "還沒有任何天數，點上方「＋ 新增天數」開始規劃吧！" : "行程統籌人還沒有新增任何天數。"}</div>`;
+    return;
+  }
+
+  contentEl.innerHTML = `
+    <div class="card" id="day-header-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <div style="font-weight:700;font-size:16px;">${escapeHtml(day.title)}</div>
+          ${day.date ? `<div style="color:var(--text-muted);font-size:13px;margin-top:2px;">${escapeHtml(day.date)}</div>` : ""}
+        </div>
+        ${canEditItinerary() ? `
+          <div style="display:flex;gap:6px;">
+            <button class="secondary-btn small-btn" id="edit-day-meta-btn">編輯</button>
+            <button class="danger-btn small-btn" id="delete-day-btn">刪除本日</button>
+          </div>` : ""}
+      </div>
+      <div id="day-blocks" style="margin-top:12px;"></div>
+    </div>
+    <div class="section-title">時段 / 景點</div>
+    <div id="spot-list"></div>
+    ${canEditItinerary() ? `<button class="primary-btn full-width" id="add-spot-btn">＋ 新增時段／景點</button>` : ""}
+  `;
+
+  renderContentBlocks(document.getElementById("day-blocks"), day.blocks || [], {
+    editable: canEditItinerary(),
+    onChange: (blocks) => updateDayBlocks(day.id, blocks),
+  });
+
+  if (canEditItinerary()) {
+    document.getElementById("edit-day-meta-btn").addEventListener("click", () => renderEditDayMetaModal(day));
+    document.getElementById("delete-day-btn").addEventListener("click", () => {
+      openConfirm(`確定要刪除「${day.title}」整天的行程嗎？裡面的景點也會一併刪除。`, async () => {
+        await deleteDay(day.id);
+        state.currentDayId = null;
+        navigate(`#/trip/${state.tripId}`);
+        toast("已刪除");
+      });
+    });
+    document.getElementById("add-spot-btn").addEventListener("click", () => renderAddSpotModal(day.id));
+  }
+
+  const spotListEl = document.getElementById("spot-list");
+  if (!state.spots.length) {
+    spotListEl.innerHTML = `<div class="empty-hint">這天還沒有安排景點</div>`;
+  } else {
+    spotListEl.innerHTML = state.spots.map((s) => `
+      <div class="spot-item" data-spotid="${s.id}">
+        <div class="spot-time">${escapeHtml(s.time || "")}</div>
+        <div class="spot-title">${escapeHtml(s.title)}</div>
+        <div>›</div>
+      </div>`).join("");
+    spotListEl.querySelectorAll("[data-spotid]").forEach((el) => {
+      el.addEventListener("click", () => {
+        navigate(`#/trip/${state.tripId}/day/${day.id}/spot/${el.dataset.spotid}`);
+      });
+    });
+  }
+}
+
+function openConfirm(message, onConfirm) {
+  openModal("請確認", `
+    <p>${escapeHtml(message)}</p>
+    <div class="form-actions">
+      <button class="secondary-btn" id="confirm-cancel">取消</button>
+      <button class="danger-btn" id="confirm-ok">確定刪除</button>
+    </div>
+  `);
+  document.getElementById("confirm-cancel").onclick = closeModal;
+  document.getElementById("confirm-ok").onclick = async () => {
+    closeModal();
+    await onConfirm();
+  };
+}
+
+function renderAddDayModal() {
+  openModal("新增天數", `
+    <div class="form-row"><label>標題</label><input type="text" id="day-title" placeholder="例如：Day 1 抵達 &amp; 市區觀光"></div>
+    <div class="form-row"><label>日期（選填）</label><input type="date" id="day-date"></div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="day-cancel">取消</button>
+      <button class="primary-btn" id="day-confirm">新增</button>
+    </div>
+  `);
+  document.getElementById("day-cancel").onclick = closeModal;
+  document.getElementById("day-confirm").onclick = async () => {
+    const title = document.getElementById("day-title").value.trim();
+    const date = document.getElementById("day-date").value;
+    if (!title) return toast("請輸入標題");
+    closeModal();
+    const id = await createDay(title, date);
+    navigate(`#/trip/${state.tripId}/day/${id}`);
+  };
+}
+
+function renderEditDayMetaModal(day) {
+  openModal("編輯本日資訊", `
+    <div class="form-row"><label>標題</label><input type="text" id="day-title" value="${escapeHtml(day.title)}"></div>
+    <div class="form-row"><label>日期</label><input type="date" id="day-date" value="${escapeHtml(day.date || "")}"></div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="day-cancel">取消</button>
+      <button class="primary-btn" id="day-confirm">儲存</button>
+    </div>
+  `);
+  document.getElementById("day-cancel").onclick = closeModal;
+  document.getElementById("day-confirm").onclick = async () => {
+    const title = document.getElementById("day-title").value.trim();
+    const date = document.getElementById("day-date").value;
+    if (!title) return toast("請輸入標題");
+    await updateDayMeta(day.id, { title, date });
+    closeModal();
+  };
+}
+
+function renderAddSpotModal(dayId) {
+  openModal("新增時段／景點", `
+    <div class="form-row"><label>景點／活動名稱</label><input type="text" id="spot-title" placeholder="例如：淺草寺"></div>
+    <div class="form-row"><label>時間（選填）</label><input type="time" id="spot-time"></div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="spot-cancel">取消</button>
+      <button class="primary-btn" id="spot-confirm">新增</button>
+    </div>
+  `);
+  document.getElementById("spot-cancel").onclick = closeModal;
+  document.getElementById("spot-confirm").onclick = async () => {
+    const title = document.getElementById("spot-title").value.trim();
+    const time = document.getElementById("spot-time").value;
+    if (!title) return toast("請輸入名稱");
+    closeModal();
+    await createSpot(dayId, title, time);
+  };
+}
+
+
+// ------------------------------------------------------------
+// 內容區塊（文字 / 圖片 / 表格）— 母頁、子頁通用
+// ------------------------------------------------------------
+function renderBlockView(block) {
+  if (block.type === "text") {
+    return `<div class="block-text">${escapeHtml(block.content)}</div>`;
+  }
+  if (block.type === "image") {
+    return `<figure class="block-image"><img src="${escapeHtml(block.url)}" alt="${escapeHtml(block.caption || "")}" loading="lazy">${block.caption ? `<figcaption>${escapeHtml(block.caption)}</figcaption>` : ""}</figure>`;
+  }
+  if (block.type === "table") {
+    const rows = block.rows || [];
+    return `<div class="block-table"><table>${rows.map((row, ri) => `<tr>${row.map((c) => ri === 0 ? `<th>${escapeHtml(c)}</th>` : `<td>${escapeHtml(c)}</td>`).join("")}</tr>`).join("")}</table></div>`;
+  }
+  return "";
+}
+
+function renderContentBlocks(container, blocks, { editable, onChange }) {
+  const list = blocks || [];
+  container.innerHTML = `
+    <div id="blocks-render"></div>
+    ${editable ? `
+      <div class="block-editor-row">
+        <button class="secondary-btn small-btn" data-add="text">＋ 文字</button>
+        <button class="secondary-btn small-btn" data-add="image">＋ 圖片連結</button>
+        <button class="secondary-btn small-btn" data-add="table">＋ 表格</button>
+      </div>` : ""}
+  `;
+  const renderEl = container.querySelector("#blocks-render");
+  if (!list.length) {
+    renderEl.innerHTML = editable ? "" : `<div class="empty-hint" style="padding:10px 0;">尚無內容</div>`;
+  } else {
+    renderEl.innerHTML = list.map((b, i) => `
+      <div class="content-block" data-idx="${i}">
+        ${renderBlockView(b)}
+        ${editable ? `
+          <div class="block-controls">
+            <button class="secondary-btn small-btn" data-act="up" data-idx="${i}" ${i === 0 ? "disabled" : ""}>↑</button>
+            <button class="secondary-btn small-btn" data-act="down" data-idx="${i}" ${i === list.length - 1 ? "disabled" : ""}>↓</button>
+            <button class="secondary-btn small-btn" data-act="edit" data-idx="${i}">編輯</button>
+            <button class="danger-btn small-btn" data-act="del" data-idx="${i}">刪除</button>
+          </div>` : ""}
+      </div>
+    `).join("");
+  }
+
+  if (!editable) return;
+
+  container.querySelectorAll("[data-add]").forEach((btn) => {
+    btn.addEventListener("click", () => renderBlockEditModal(btn.dataset.add, null, (newBlock) => {
+      onChange([...(blocks || []), newBlock]);
+    }));
+  });
+  renderEl.querySelectorAll("[data-act]").forEach((btn) => {
+    const idx = Number(btn.dataset.idx);
+    btn.addEventListener("click", () => {
+      const arr = [...list];
+      if (btn.dataset.act === "up" && idx > 0) {
+        [arr[idx - 1], arr[idx]] = [arr[idx], arr[idx - 1]];
+        onChange(arr);
+      } else if (btn.dataset.act === "down" && idx < arr.length - 1) {
+        [arr[idx + 1], arr[idx]] = [arr[idx], arr[idx + 1]];
+        onChange(arr);
+      } else if (btn.dataset.act === "del") {
+        arr.splice(idx, 1);
+        onChange(arr);
+      } else if (btn.dataset.act === "edit") {
+        renderBlockEditModal(arr[idx].type, arr[idx], (updated) => {
+          arr[idx] = updated;
+          onChange(arr);
+        });
+      }
+    });
+  });
+}
+
+function renderBlockEditModal(type, existing, onSave) {
+  let bodyHtml = "";
+  if (type === "text") {
+    bodyHtml = `<div class="form-row"><textarea id="blk-text" placeholder="輸入文字說明...">${escapeHtml(existing?.content || "")}</textarea></div>`;
+  } else if (type === "image") {
+    bodyHtml = `
+      <div class="form-row"><label>圖片網址</label><input type="text" id="blk-url" placeholder="https://..." value="${escapeHtml(existing?.url || "")}"></div>
+      <div class="form-row"><label>圖片說明（選填）</label><input type="text" id="blk-caption" value="${escapeHtml(existing?.caption || "")}"></div>
+      ${existing?.url ? `<img src="${escapeHtml(existing.url)}" style="max-width:100%;border-radius:8px;margin-bottom:8px;">` : ""}
+    `;
+  } else if (type === "table") {
+    const rows = existing?.rows || [["欄位1", "欄位2"], ["", ""]];
+    bodyHtml = `
+      <div class="form-row">
+        <label>表格內容（第一列為標題列）</label>
+        <div id="table-editor"></div>
+        <div style="display:flex;gap:6px;margin-top:6px;">
+          <button class="secondary-btn small-btn" id="add-row-btn">＋ 新增列</button>
+          <button class="secondary-btn small-btn" id="add-col-btn">＋ 新增欄</button>
+        </div>
+      </div>
+    `;
+    // 用閉包保存 rows 供下方渲染使用
+    window.__tmpTableRows = rows.map((r) => [...r]);
+  }
+
+  openModal(existing ? "編輯區塊" : "新增區塊", `
+    ${bodyHtml}
+    <div class="form-actions">
+      <button class="secondary-btn" id="blk-cancel">取消</button>
+      <button class="primary-btn" id="blk-save">儲存</button>
+    </div>
+  `);
+
+  if (type === "table") {
+    const renderTableEditor = () => {
+      const rows = window.__tmpTableRows;
+      const editorEl = document.getElementById("table-editor");
+      editorEl.innerHTML = `<table style="border-collapse:collapse;width:100%;">${rows.map((row, ri) => `
+        <tr>${row.map((cell, ci) => `<td style="border:1px solid var(--border);padding:2px;"><input type="text" data-r="${ri}" data-c="${ci}" value="${escapeHtml(cell)}" style="width:100%;border:none;padding:6px;font-size:13px;"></td>`).join("")}
+        <td><button class="icon-btn del-row-btn" data-r="${ri}" style="font-size:13px;">✕</button></td></tr>
+      `).join("")}</table>`;
+      editorEl.querySelectorAll("input").forEach((inp) => {
+        inp.addEventListener("input", () => {
+          rows[Number(inp.dataset.r)][Number(inp.dataset.c)] = inp.value;
+        });
+      });
+      editorEl.querySelectorAll(".del-row-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          if (rows.length <= 1) return;
+          rows.splice(Number(btn.dataset.r), 1);
+          renderTableEditor();
+        });
+      });
+    };
+    renderTableEditor();
+    document.getElementById("add-row-btn").addEventListener("click", () => {
+      const cols = window.__tmpTableRows[0]?.length || 2;
+      window.__tmpTableRows.push(new Array(cols).fill(""));
+      renderTableEditor();
+    });
+    document.getElementById("add-col-btn").addEventListener("click", () => {
+      window.__tmpTableRows.forEach((r) => r.push(""));
+      renderTableEditor();
+    });
+  }
+
+  document.getElementById("blk-cancel").onclick = closeModal;
+  document.getElementById("blk-save").onclick = () => {
+    let block;
+    if (type === "text") {
+      const content = document.getElementById("blk-text").value.trim();
+      if (!content) return toast("請輸入文字內容");
+      block = { type: "text", content };
+    } else if (type === "image") {
+      const url = document.getElementById("blk-url").value.trim();
+      const caption = document.getElementById("blk-caption").value.trim();
+      if (!url) return toast("請輸入圖片網址");
+      block = { type: "image", url, caption };
+    } else if (type === "table") {
+      block = { type: "table", rows: window.__tmpTableRows.map((r) => [...r]) };
+      delete window.__tmpTableRows;
+    }
+    closeModal();
+    onSave(block);
+  };
+}
+
+
+// ------------------------------------------------------------
+// 景點詳細頁（含許願池）
+// ------------------------------------------------------------
+function renderSpotPage() {
+  if (!state.currentSpot) return;
+  const root = document.getElementById("app-root");
+  const day = state.days.find((d) => d.id === state.currentDayId) || { title: "" };
+  const spot = state.currentSpot;
+  const canEdit = canEditItinerary();
+
+  root.innerHTML = `
+    <div class="breadcrumb">
+      <span id="bc-trip">${escapeHtml(state.trip.name)}</span> ›
+      <span id="bc-day">${escapeHtml(day.title)}</span> ›
+      ${escapeHtml(spot.title)}
+    </div>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <div style="font-weight:700;font-size:17px;">${escapeHtml(spot.title)}</div>
+          ${spot.time ? `<div style="color:var(--text-muted);font-size:13px;margin-top:2px;">🕒 ${escapeHtml(spot.time)}</div>` : ""}
+        </div>
+        ${canEdit ? `
+          <div style="display:flex;gap:6px;">
+            <button class="secondary-btn small-btn" id="edit-spot-meta-btn">編輯</button>
+            <button class="danger-btn small-btn" id="delete-spot-btn">刪除</button>
+          </div>` : ""}
+      </div>
+      <div id="spot-blocks" style="margin-top:12px;"></div>
+    </div>
+
+    <div class="section-title">💭 許願池</div>
+    <div class="card">
+      <p style="color:var(--text-muted);font-size:13px;margin-top:0;">大家都可以在這裡留言，寫下想去的地方、想吃的東西（不限權限）</p>
+      <div class="form-row" style="display:flex;gap:8px;">
+        <input type="text" id="wish-input" placeholder="想去...想吃..." style="flex:1;">
+        <button class="primary-btn" id="wish-submit">送出</button>
+      </div>
+      <div id="wish-list"></div>
+    </div>
+  `;
+
+  document.getElementById("bc-trip").addEventListener("click", () => navigate(`#/trip/${state.tripId}`));
+  document.getElementById("bc-day").addEventListener("click", () => navigate(`#/trip/${state.tripId}/day/${day.id}`));
+
+  renderContentBlocks(document.getElementById("spot-blocks"), spot.blocks || [], {
+    editable: canEdit,
+    onChange: (blocks) => updateSpotBlocks(day.id, spot.id, blocks),
+  });
+
+  if (canEdit) {
+    document.getElementById("edit-spot-meta-btn").addEventListener("click", () => renderEditSpotMetaModal(day.id, spot));
+    document.getElementById("delete-spot-btn").addEventListener("click", () => {
+      openConfirm(`確定要刪除「${spot.title}」嗎？`, async () => {
+        await deleteSpot(day.id, spot.id);
+        navigate(`#/trip/${state.tripId}/day/${day.id}`);
+        toast("已刪除");
+      });
+    });
+  }
+
+  const wishListEl = document.getElementById("wish-list");
+  if (!state.wishes.length) {
+    wishListEl.innerHTML = `<div class="empty-hint">還沒有人許願，第一個留言看看吧！</div>`;
+  } else {
+    const my = myMember();
+    wishListEl.innerHTML = state.wishes.map((w) => `
+      <div class="wish-item" data-wishid="${w.id}">
+        <div class="wish-author">${escapeHtml(w.authorName)}</div>
+        <div class="wish-text">${escapeHtml(w.text)}</div>
+        <div class="wish-time">${fmtDateTime(w.createdAt)}
+          ${(my && (w.authorId === my.id || isOwner())) ? `<span class="del-wish-btn" data-wishid="${w.id}" style="color:var(--danger);cursor:pointer;margin-left:8px;">刪除</span>` : ""}
+        </div>
+      </div>
+    `).join("");
+    wishListEl.querySelectorAll(".del-wish-btn").forEach((btn) => {
+      btn.addEventListener("click", () => deleteWish(day.id, spot.id, btn.dataset.wishid));
+    });
+  }
+
+  const submitWish = async () => {
+    const input = document.getElementById("wish-input");
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+    await addWish(day.id, spot.id, text);
+  };
+  document.getElementById("wish-submit").addEventListener("click", submitWish);
+  document.getElementById("wish-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submitWish();
+  });
+}
+
+function renderEditSpotMetaModal(dayId, spot) {
+  openModal("編輯景點資訊", `
+    <div class="form-row"><label>名稱</label><input type="text" id="spot-title" value="${escapeHtml(spot.title)}"></div>
+    <div class="form-row"><label>時間</label><input type="time" id="spot-time" value="${escapeHtml(spot.time || "")}"></div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="spot-cancel">取消</button>
+      <button class="primary-btn" id="spot-confirm">儲存</button>
+    </div>
+  `);
+  document.getElementById("spot-cancel").onclick = closeModal;
+  document.getElementById("spot-confirm").onclick = async () => {
+    const title = document.getElementById("spot-title").value.trim();
+    const time = document.getElementById("spot-time").value;
+    if (!title) return toast("請輸入名稱");
+    await updateSpotMeta(dayId, spot.id, { title, time });
+    closeModal();
+  };
+}
+
+
+// ------------------------------------------------------------
+// 記帳與分帳結算邏輯（內部一律用「分」為單位計算，避免浮點誤差）
+// ------------------------------------------------------------
+function computeBalances(expenses, members) {
+  const balance = {};
+  members.forEach((m) => (balance[m.id] = 0));
+  expenses.forEach((e) => {
+    if (!(e.payerId in balance)) balance[e.payerId] = 0;
+    balance[e.payerId] += e.amountCents;
+    const share = e.amountCents / e.splitWith.length;
+    e.splitWith.forEach((mid) => {
+      if (!(mid in balance)) balance[mid] = 0;
+      balance[mid] -= share;
+    });
+  });
+  return balance;
+}
+
+function computeSettlement(expenses, members) {
+  const balance = computeBalances(expenses, members);
+  const creditors = [];
+  const debtors = [];
+  Object.entries(balance).forEach(([id, amt]) => {
+    const rounded = Math.round(amt);
+    if (rounded > 0) creditors.push({ id, amt: rounded });
+    else if (rounded < 0) debtors.push({ id, amt: -rounded });
+  });
+  creditors.sort((a, b) => b.amt - a.amt);
+  debtors.sort((a, b) => b.amt - a.amt);
+
+  const transactions = [];
+  let ci = 0, di = 0;
+  while (ci < creditors.length && di < debtors.length) {
+    const c = creditors[ci];
+    const d = debtors[di];
+    const amt = Math.min(c.amt, d.amt);
+    if (amt > 0) transactions.push({ from: d.id, to: c.id, amountCents: amt });
+    c.amt -= amt;
+    d.amt -= amt;
+    if (c.amt === 0) ci++;
+    if (d.amt === 0) di++;
+  }
+  return { balance, transactions };
+}
+
+function memberName(id) {
+  const m = state.trip.members.find((x) => x.id === id);
+  return m ? m.name : "（已移除的成員）";
+}
+
+function renderExpensesPage() {
+  const root = document.getElementById("app-root");
+  const members = state.trip.members;
+
+  // 依日期分組
+  const byDate = {};
+  state.expenses.forEach((e) => {
+    const key = e.date || "未指定日期";
+    (byDate[key] = byDate[key] || []).push(e);
+  });
+  const dateKeys = Object.keys(byDate).sort();
+
+  const { balance, transactions } = computeSettlement(state.expenses, members);
+
+  root.innerHTML = `
+    <div class="tabs">
+      <button class="tab-btn" id="tab-itinerary">📅 行程</button>
+      <button class="tab-btn active" id="tab-expenses">💰 記帳與分帳</button>
+    </div>
+
+    <div class="section-title">結算總覽</div>
+    <div class="card">
+      ${members.map((m) => `
+        <div class="balance-row">
+          <span>${escapeHtml(m.name)}</span>
+          <span style="color:${balance[m.id] >= 0 ? "#16a34a" : "var(--danger)"};font-weight:600;">
+            ${balance[m.id] > 50 ? `應收 $${fmtMoney(balance[m.id])}` : balance[m.id] < -50 ? `應付 $${fmtMoney(Math.abs(balance[m.id]))}` : "已結清"}
+          </span>
+        </div>
+      `).join("")}
+      ${transactions.length ? `
+        <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border);">
+          <div style="font-weight:600;font-size:13px;margin-bottom:6px;color:var(--text-muted);">建議轉帳方式（已自動精簡筆數）</div>
+          ${transactions.map((t) => `
+            <div class="balance-row">
+              <span>${escapeHtml(memberName(t.from))} <span class="settle-arrow">→</span> ${escapeHtml(memberName(t.to))}</span>
+              <span style="font-weight:700;">$${fmtMoney(t.amountCents)}</span>
+            </div>
+          `).join("")}
+        </div>
+      ` : `<div class="empty-hint">目前帳務已結清 🎉</div>`}
+    </div>
+
+    <div class="section-title">消費明細</div>
+    <button class="primary-btn full-width" id="add-expense-btn" style="margin-bottom:12px;">＋ 新增一筆消費</button>
+    <div id="expense-list">
+      ${dateKeys.length ? dateKeys.map((dk) => {
+        const items = byDate[dk];
+        const subtotal = items.reduce((s, e) => s + e.amountCents, 0);
+        return `
+          <div style="margin-bottom:16px;">
+            <div style="display:flex;justify-content:space-between;font-size:13px;color:var(--text-muted);margin-bottom:6px;">
+              <span>${escapeHtml(dk)}</span><span>小計 $${fmtMoney(subtotal)}</span>
+            </div>
+            ${items.map((e) => `
+              <div class="expense-item" data-id="${e.id}">
+                <div class="expense-top">
+                  <span>${escapeHtml(e.title)}</span>
+                  <span class="expense-amount">$${fmtMoney(e.amountCents)}</span>
+                </div>
+                <div class="expense-meta">
+                  ${escapeHtml(memberName(e.payerId))} 先付款，由 ${e.splitWith.map(memberName).map(escapeHtml).join("、")} 分攤
+                  ${e.note ? ` · ${escapeHtml(e.note)}` : ""}
+                </div>
+                <div style="margin-top:6px;">
+                  <span class="danger-btn small-btn del-expense-btn" data-id="${e.id}">刪除</span>
+                </div>
+              </div>
+            `).join("")}
+          </div>
+        `;
+      }).join("") : `<div class="empty-hint">還沒有任何消費紀錄</div>`}
+    </div>
+  `;
+
+  document.getElementById("tab-itinerary").onclick = () => navigate(`#/trip/${state.tripId}${state.currentDayId ? "/day/" + state.currentDayId : ""}`);
+  document.getElementById("tab-expenses").onclick = () => {};
+  document.getElementById("add-expense-btn").addEventListener("click", renderAddExpenseModal);
+  root.querySelectorAll(".del-expense-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      openConfirm("確定要刪除這筆消費紀錄嗎？", async () => {
+        await deleteExpense(btn.dataset.id);
+      });
+    });
+  });
+}
+
+function renderAddExpenseModal() {
+  const members = state.trip.members;
+  const my = myMember();
+  let splitWith = members.map((m) => m.id); // 預設全員分攤
+
+  openModal("新增消費", `
+    <div class="form-row"><label>項目名稱</label><input type="text" id="exp-title" placeholder="例如：午餐"></div>
+    <div class="form-row"><label>金額（元）</label><input type="number" id="exp-amount" min="0" step="1" placeholder="0"></div>
+    <div class="form-row">
+      <label>由誰先付款</label>
+      <select id="exp-payer">
+        ${members.map((m) => `<option value="${m.id}" ${my && m.id === my.id ? "selected" : ""}>${escapeHtml(m.name)}</option>`).join("")}
+      </select>
+    </div>
+    <div class="form-row">
+      <label>要跟誰分攤（可複選）</label>
+      <div class="checkbox-group" id="split-group">
+        ${members.map((m) => `<div class="checkbox-chip checked" data-id="${m.id}">${escapeHtml(m.name)}</div>`).join("")}
+      </div>
+    </div>
+    <div class="form-row"><label>日期</label><input type="date" id="exp-date" value="${todayStr()}"></div>
+    <div class="form-row"><label>備註（選填）</label><input type="text" id="exp-note"></div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="exp-cancel">取消</button>
+      <button class="primary-btn" id="exp-confirm">新增</button>
+    </div>
+  `);
+
+  document.querySelectorAll("#split-group .checkbox-chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      const id = chip.dataset.id;
+      if (splitWith.includes(id)) {
+        if (splitWith.length === 1) return toast("至少要有一人分攤");
+        splitWith = splitWith.filter((x) => x !== id);
+        chip.classList.remove("checked");
+      } else {
+        splitWith.push(id);
+        chip.classList.add("checked");
+      }
+    });
+  });
+
+  document.getElementById("exp-cancel").onclick = closeModal;
+  document.getElementById("exp-confirm").onclick = async () => {
+    const title = document.getElementById("exp-title").value.trim();
+    const amount = parseFloat(document.getElementById("exp-amount").value);
+    const payerId = document.getElementById("exp-payer").value;
+    const date = document.getElementById("exp-date").value;
+    const note = document.getElementById("exp-note").value.trim();
+    if (!title) return toast("請輸入項目名稱");
+    if (!amount || amount <= 0) return toast("請輸入正確金額");
+    if (!splitWith.length) return toast("請至少選擇一位分攤者");
+    closeModal();
+    await addExpense({ title, amountCents: Math.round(amount * 100), payerId, splitWith, date, note });
+  };
+}
+
+
+// ------------------------------------------------------------
+// 管理成員與權限（僅統籌人 owner 可操作）
+// ------------------------------------------------------------
+function renderManageMembersModal() {
+  let members = state.trip.members.map((m) => ({ ...m }));
+
+  function rowHtml(m) {
+    return `
+      <div class="block-editor-row" data-row="${m.id}">
+        <input type="text" value="${escapeHtml(m.name)}" data-field="name" data-row="${m.id}" style="flex:1;min-width:100px;padding:8px;border:1px solid var(--border);border-radius:8px;">
+        <select data-field="permission" data-row="${m.id}" style="padding:8px;border:1px solid var(--border);border-radius:8px;">
+          <option value="owner" ${m.permission === "owner" ? "selected" : ""}>統籌人</option>
+          <option value="editor" ${m.permission === "editor" ? "selected" : ""}>可編輯</option>
+          <option value="viewer" ${m.permission === "viewer" ? "selected" : ""}>唯讀</option>
+        </select>
+        <button class="icon-btn remove-member-row" data-row="${m.id}">✕</button>
+      </div>`;
+  }
+  function renderRows() {
+    const wrap = document.getElementById("manage-members-wrap");
+    wrap.innerHTML = members.map(rowHtml).join("");
+    wrap.querySelectorAll("input[data-field=name]").forEach((inp) => {
+      inp.addEventListener("input", () => {
+        members.find((x) => x.id === inp.dataset.row).name = inp.value;
+      });
+    });
+    wrap.querySelectorAll("select[data-field=permission]").forEach((sel) => {
+      sel.addEventListener("change", () => {
+        members.find((x) => x.id === sel.dataset.row).permission = sel.value;
+      });
+    });
+    wrap.querySelectorAll(".remove-member-row").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        if (members.length <= 1) return toast("至少要保留一位成員");
+        members = members.filter((x) => x.id !== btn.dataset.row);
+        renderRows();
+      });
+    });
+  }
+
+  openModal("管理成員與權限", `
+    <div id="manage-members-wrap"></div>
+    <button class="secondary-btn small-btn" id="manage-add-member-btn" style="margin-top:4px;">＋ 新增成員</button>
+    <p style="font-size:12px;color:var(--text-muted);margin-top:12px;">
+      提醒：移除成員不會刪除他過去留下的許願池留言或消費紀錄，但他將無法再用原本的身份登入。
+    </p>
+    <div class="form-actions">
+      <button class="secondary-btn" id="manage-cancel">取消</button>
+      <button class="primary-btn" id="manage-save">儲存</button>
+    </div>
+  `);
+  renderRows();
+  document.getElementById("manage-add-member-btn").addEventListener("click", () => {
+    members.push({ id: newLocalId(), name: "", permission: "editor" });
+    renderRows();
+  });
+  document.getElementById("manage-cancel").onclick = closeModal;
+  document.getElementById("manage-save").onclick = async () => {
+    const cleaned = members.filter((m) => m.name.trim()).map((m) => ({ ...m, name: m.name.trim() }));
+    if (!cleaned.length) return toast("至少要有一位成員");
+    if (!cleaned.some((m) => m.permission === "owner")) {
+      return toast("至少要有一位統籌人（owner）");
+    }
+    await updateTripMembers(cleaned);
+    closeModal();
+    toast("已更新成員設定");
+  };
+}
+
+// ------------------------------------------------------------
+// 啟動
+// ------------------------------------------------------------
+authReady.then(() => {
+  route();
+});
