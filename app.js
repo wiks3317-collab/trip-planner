@@ -40,6 +40,69 @@ function fmtMoney(cents) {
   return v.toLocaleString("zh-Hant-TW", { maximumFractionDigits: 0 });
 }
 
+// ------------------------------------------------------------
+// 幣別
+// ------------------------------------------------------------
+const CURRENCY_OPTIONS = [
+  { code: "TWD", label: "新台幣" },
+  { code: "JPY", label: "日圓" },
+  { code: "USD", label: "美金" },
+  { code: "EUR", label: "歐元" },
+  { code: "KRW", label: "韓元" },
+  { code: "CNY", label: "人民幣" },
+  { code: "HKD", label: "港幣" },
+  { code: "THB", label: "泰銖" },
+  { code: "GBP", label: "英鎊" },
+  { code: "AUD", label: "澳幣" },
+  { code: "SGD", label: "新加坡幣" },
+  { code: "MYR", label: "馬來西亞幣" },
+  { code: "PHP", label: "菲律賓披索" },
+  { code: "VND", label: "越南盾" },
+  { code: "IDR", label: "印尼盾" },
+  { code: "MOP", label: "澳門幣" },
+  { code: "CAD", label: "加拿大幣" },
+  { code: "CHF", label: "瑞士法郎" },
+];
+function currencyLabel(code) {
+  const c = CURRENCY_OPTIONS.find((x) => x.code === code);
+  return c ? `${c.code} ${c.label}` : code;
+}
+function tripCurrencies() {
+  const list = state.trip && state.trip.currencies;
+  return list && list.length ? list : ["TWD"];
+}
+function fmtCurrencyAmt(cents, currency) {
+  const v = fmtMoney(cents);
+  return currency === "TWD" ? `NT$${v}` : `${currency} $${v}`;
+}
+
+// 用 fawazahmed0/currency-api（免費、無需金鑰、支援歷史日期）查詢某天的匯率
+// 回傳：1 單位 fromCurrency 兌換成多少 TWD；查不到則回傳 null
+async function fetchExchangeRate(dateStr, fromCurrency) {
+  if (fromCurrency === "TWD") return 1;
+  const from = fromCurrency.toLowerCase();
+  const dateSeg = dateStr || "latest";
+  const urls = [
+    `https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@${dateSeg}/v1/currencies/${from}.json`,
+    `https://${dateSeg}.currency-api.pages.dev/v1/currencies/${from}.json`,
+  ];
+  for (const url of urls) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 6000);
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timer);
+      if (!res.ok) continue;
+      const data = await res.json();
+      const rate = data[from] && data[from].twd;
+      if (typeof rate === "number") return rate;
+    } catch {
+      // 試下一個備援網址
+    }
+  }
+  return null;
+}
+
 function fmtDateTime(ts) {
   if (!ts) return "";
   const d = ts.toDate ? ts.toDate() : new Date(ts);
@@ -88,6 +151,63 @@ function setMyMemberId(tripId, memberId) {
   if (memberId) localStorage.setItem(LS_MEMBER_PREFIX + tripId, memberId);
   else localStorage.removeItem(LS_MEMBER_PREFIX + tripId);
 }
+
+// ------------------------------------------------------------
+// 外觀設定（顏色 / 字型 / 字級）— 存在裝置本機，套用到整個網頁
+// ------------------------------------------------------------
+const LS_APPEARANCE = "tp_appearance";
+
+const THEME_PRESETS = [
+  { id: "ocean", name: "海洋藍", primary: "#0E6B64", primaryDark: "#0A5450", accent: "#D98E2B", bg: "#EEF3F0" },
+  { id: "dusk", name: "薄暮紫", primary: "#5B4B8A", primaryDark: "#453873", accent: "#E8A33D", bg: "#F2EFF7" },
+  { id: "forest", name: "山林綠", primary: "#2F6B3A", primaryDark: "#23512C", accent: "#C97B2E", bg: "#EFF4EC" },
+  { id: "wheat", name: "麥浪黃", primary: "#B9840F", primaryDark: "#8F6608", accent: "#0E6B64", bg: "#F6F1E6" },
+  { id: "slate", name: "石板灰", primary: "#3B5166", primaryDark: "#2C3D4D", accent: "#C9A227", bg: "#EEF0F2" },
+];
+
+const FONT_PRESETS = [
+  { id: "journal", name: "手札質感", heading: '"LXGW WenKai TC", "Noto Serif TC", serif', body: '"Noto Sans TC", sans-serif' },
+  { id: "modern", name: "現代俐落", heading: '"Noto Sans TC", sans-serif', body: '"Noto Sans TC", sans-serif' },
+  { id: "refined", name: "細緻雅致", heading: '"Noto Serif TC", serif', body: '"Noto Sans TC", sans-serif' },
+];
+
+const SIZE_PRESETS = [
+  { id: "sm", name: "小", px: "15px" },
+  { id: "md", name: "中", px: "16px" },
+  { id: "lg", name: "大", px: "18px" },
+];
+
+function loadAppearance() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LS_APPEARANCE) || "{}");
+    return {
+      themeId: saved.themeId || "ocean",
+      fontId: saved.fontId || "journal",
+      sizeId: saved.sizeId || "md",
+    };
+  } catch {
+    return { themeId: "ocean", fontId: "journal", sizeId: "md" };
+  }
+}
+function saveAppearance(settings) {
+  localStorage.setItem(LS_APPEARANCE, JSON.stringify(settings));
+}
+function applyAppearance(settings) {
+  const theme = THEME_PRESETS.find((t) => t.id === settings.themeId) || THEME_PRESETS[0];
+  const font = FONT_PRESETS.find((f) => f.id === settings.fontId) || FONT_PRESETS[0];
+  const size = SIZE_PRESETS.find((s) => s.id === settings.sizeId) || SIZE_PRESETS[1];
+  const root = document.documentElement.style;
+  root.setProperty("--primary", theme.primary);
+  root.setProperty("--primary-dark", theme.primaryDark);
+  root.setProperty("--accent", theme.accent);
+  root.setProperty("--bg", theme.bg);
+  root.setProperty("--font-heading", font.heading);
+  root.setProperty("--font-body", font.body);
+  root.setProperty("--base-font-size", size.px);
+}
+
+// 一載入就先套用外觀設定，讓載入畫面也是對的樣式
+applyAppearance(loadAppearance());
 
 // ------------------------------------------------------------
 // 全域狀態
@@ -167,9 +287,14 @@ function parseHash() {
   // #/trip/TRIPID/day/DAYID
   // #/trip/TRIPID/day/DAYID/spot/SPOTID
   // #/trip/TRIPID/expenses
+  // #/import/CODE
   const h = window.location.hash.replace(/^#\/?/, "");
   const parts = h.split("/").filter(Boolean);
   const result = {};
+  if (parts[0] === "import" && parts[1]) {
+    result.importCode = decodeURIComponent(parts[1]);
+    return result;
+  }
   if (parts[0] === "trip" && parts[1]) {
     result.tripId = parts[1];
     if (parts[2] === "day" && parts[3]) {
@@ -186,6 +311,12 @@ function parseHash() {
 
 async function route() {
   const r = parseHash();
+
+  if (r.importCode) {
+    importSyncCode(r.importCode);
+    return;
+  }
+
   if (!r.tripId) {
     clearAllUnsub();
     state.tripId = null;
@@ -251,7 +382,7 @@ async function loadTrip(tripId) {
     return;
   }
   state.trip = { id: tripId, ...snap.data() };
-  updateMyTripName(tripId, state.trip.name);
+  saveMyTrip(tripId, state.trip.name);
 
   state.unsub.trip = onSnapshot(tripRef, (s) => {
     if (!s.exists()) return;
@@ -277,6 +408,10 @@ async function createTrip(name, members) {
 
 async function updateTripMembers(members) {
   await updateDoc(doc(db, "trips", state.tripId), { members });
+}
+
+async function updateTripCurrencies(currencies) {
+  await updateDoc(doc(db, "trips", state.tripId), { currencies });
 }
 
 async function renameTrip(name) {
@@ -422,9 +557,9 @@ function subscribeExpenses() {
   });
 }
 
-async function addExpense({ title, amountCents, payerId, splitWith, date, note }) {
+async function addExpense({ title, amountCents, currency, rateToTWD, amountTWDCents, payerId, splitWith, date, note }) {
   await addDoc(collection(db, "trips", state.tripId, "expenses"), {
-    title, amountCents, payerId, splitWith, date, note: note || "",
+    title, amountCents, currency, rateToTWD, amountTWDCents, payerId, splitWith, date, note: note || "",
     createdAt: serverTimestamp(),
   });
 }
@@ -443,18 +578,49 @@ function updateHeader() {
   if (state.trip) {
     nameEl.textContent = state.trip.name;
     const m = myMember();
-    if (m) {
-      badge.textContent = `你是：${m.name}${m.permission === "viewer" ? "（唯讀）" : ""}`;
-      badge.classList.remove("hidden");
-    } else {
-      badge.classList.add("hidden");
-    }
+    badge.textContent = m
+      ? `你是：${m.name}${m.permission === "viewer" ? "（唯讀）" : ""} ▾`
+      : "選擇你的身份 ▾";
+    badge.classList.remove("hidden");
     shareBtn.classList.remove("hidden");
   } else {
     nameEl.textContent = "旅行行程規劃工具";
     badge.classList.add("hidden");
     shareBtn.classList.add("hidden");
   }
+}
+
+document.getElementById("current-member-badge").addEventListener("click", renderMemberSwitchModal);
+
+function renderMemberSwitchModal() {
+  if (!state.trip) return;
+  const members = state.trip.members || [];
+  const my = myMember();
+  openModal("切換身份", `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">選擇你在「${escapeHtml(state.trip.name)}」中的身份。</p>
+    <div class="member-chip-picker">
+      ${members.map((m) => `
+        <button class="member-pick-btn ${my && my.id === m.id ? "active" : ""}" data-id="${m.id}">
+          <span>${escapeHtml(m.name)}</span>
+          <span class="perm-tag">${permLabel(m.permission)}</span>
+        </button>`).join("")}
+    </div>
+    <button class="secondary-btn full-width" id="switch-readonly-btn" style="margin-top:14px;">改用唯讀模式瀏覽（不指定身份）</button>
+  `);
+  document.querySelectorAll("#modal-box .member-pick-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setMyMemberId(state.tripId, btn.dataset.id);
+      sessionStorage.removeItem("tp_skip_pick_" + state.tripId);
+      closeModal();
+      route();
+    });
+  });
+  document.getElementById("switch-readonly-btn").addEventListener("click", () => {
+    setMyMemberId(state.tripId, null);
+    sessionStorage.setItem("tp_skip_pick_" + state.tripId, "1");
+    closeModal();
+    route();
+  });
 }
 
 document.getElementById("share-btn").addEventListener("click", () => {
@@ -468,6 +634,87 @@ document.getElementById("share-btn").addEventListener("click", () => {
   }
 });
 
+document.getElementById("appearance-btn").addEventListener("click", renderAppearanceModal);
+
+function renderAppearanceModal() {
+  const current = loadAppearance();
+
+  openModal("外觀設定", `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">這些設定只會套用在這台裝置／瀏覽器上，不會影響同行人看到的樣子。</p>
+
+    <div class="form-row">
+      <label>色彩主題</label>
+      <div class="theme-swatch-grid" id="theme-swatch-grid">
+        ${THEME_PRESETS.map((t) => `
+          <button class="theme-swatch ${current.themeId === t.id ? "active" : ""}" data-theme="${t.id}">
+            <span class="theme-swatch-dot" style="background:${t.primary};"></span>
+            <span class="theme-swatch-label">${escapeHtml(t.name)}</span>
+          </button>
+        `).join("")}
+      </div>
+    </div>
+
+    <div class="form-row">
+      <label>字體風格</label>
+      <div class="font-option-list" id="font-option-list">
+        ${FONT_PRESETS.map((f) => `
+          <button class="font-option-btn ${current.fontId === f.id ? "active" : ""}" data-font="${f.id}">
+            <span class="font-option-preview" style="font-family:${f.heading};">旅程 Aa</span>
+            <span class="font-option-name">${escapeHtml(f.name)}</span>
+          </button>
+        `).join("")}
+      </div>
+    </div>
+
+    <div class="form-row">
+      <label>文字大小</label>
+      <div class="size-option-row" id="size-option-row">
+        ${SIZE_PRESETS.map((s) => `
+          <button class="size-option-btn ${current.sizeId === s.id ? "active" : ""}" data-size="${s.id}">${escapeHtml(s.name)}</button>
+        `).join("")}
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <button class="secondary-btn" id="appearance-reset-btn">恢復預設</button>
+      <button class="primary-btn" id="appearance-close-btn">完成</button>
+    </div>
+  `);
+
+  const applyAndSave = (patch) => {
+    const settings = { ...loadAppearance(), ...patch };
+    saveAppearance(settings);
+    applyAppearance(settings);
+  };
+
+  document.querySelectorAll("#theme-swatch-grid .theme-swatch").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      applyAndSave({ themeId: btn.dataset.theme });
+      document.querySelectorAll("#theme-swatch-grid .theme-swatch").forEach((b) => b.classList.toggle("active", b === btn));
+    });
+  });
+  document.querySelectorAll("#font-option-list .font-option-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      applyAndSave({ fontId: btn.dataset.font });
+      document.querySelectorAll("#font-option-list .font-option-btn").forEach((b) => b.classList.toggle("active", b === btn));
+    });
+  });
+  document.querySelectorAll("#size-option-row .size-option-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      applyAndSave({ sizeId: btn.dataset.size });
+      document.querySelectorAll("#size-option-row .size-option-btn").forEach((b) => b.classList.toggle("active", b === btn));
+    });
+  });
+  document.getElementById("appearance-reset-btn").addEventListener("click", () => {
+    const defaults = { themeId: "ocean", fontId: "journal", sizeId: "md" };
+    saveAppearance(defaults);
+    applyAppearance(defaults);
+    closeModal();
+    renderAppearanceModal();
+  });
+  document.getElementById("appearance-close-btn").onclick = closeModal;
+}
+
 document.getElementById("menu-toggle-btn").addEventListener("click", () => {
   document.getElementById("menu-overlay").classList.remove("hidden");
   document.getElementById("trip-menu").classList.remove("hidden");
@@ -480,20 +727,23 @@ function closeMenu() {
 }
 
 function renderTripMenu() {
-  const manageBtn = document.getElementById("manage-members-menu-btn");
-  if (manageBtn) manageBtn.remove();
+  ["manage-members-menu-btn", "currency-settings-menu-btn"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.remove();
+  });
   if (state.trip && isOwner()) {
-    const btn = document.createElement("button");
-    btn.id = "manage-members-menu-btn";
-    btn.className = "secondary-btn full-width";
-    btn.style.margin = "0 12px 12px";
-    btn.style.width = "calc(100% - 24px)";
-    btn.textContent = "👥 管理成員與權限";
-    btn.addEventListener("click", () => {
-      closeMenu();
-      renderManageMembersModal();
-    });
-    document.getElementById("new-trip-btn").insertAdjacentElement("beforebegin", btn);
+    const mkBtn = (id, label, onClick) => {
+      const btn = document.createElement("button");
+      btn.id = id;
+      btn.className = "secondary-btn full-width";
+      btn.style.margin = "0 12px 10px";
+      btn.style.width = "calc(100% - 24px)";
+      btn.textContent = label;
+      btn.addEventListener("click", () => { closeMenu(); onClick(); });
+      document.getElementById("new-trip-btn").insertAdjacentElement("beforebegin", btn);
+    };
+    mkBtn("currency-settings-menu-btn", "💱 貨幣設定", renderCurrencySettingsModal);
+    mkBtn("manage-members-menu-btn", "👥 管理成員與權限", renderManageMembersModal);
   }
 
   const list = document.getElementById("trip-list");
@@ -551,6 +801,93 @@ document.getElementById("join-trip-btn").addEventListener("click", () => {
   };
 });
 
+// ------------------------------------------------------------
+// 跨裝置同步「我的行程」清單
+// 因為沒有帳號登入，這份清單只存在單一瀏覽器裡。
+// 這個功能讓使用者把清單打包成一段代碼／連結，帶到另一台裝置匯入。
+// ------------------------------------------------------------
+function encodeSyncCode(list) {
+  return btoa(encodeURIComponent(JSON.stringify(list)));
+}
+function decodeSyncCode(code) {
+  return JSON.parse(decodeURIComponent(atob(code)));
+}
+
+function importSyncCode(code) {
+  let incoming;
+  try {
+    incoming = decodeSyncCode(code);
+    if (!Array.isArray(incoming)) throw new Error("格式錯誤");
+  } catch {
+    toast("同步代碼無效，請確認複製完整");
+    navigate("");
+    return;
+  }
+  const existing = getMyTrips();
+  const existingIds = new Set(existing.map((t) => t.id));
+  let addedCount = 0;
+  incoming.forEach((t) => {
+    if (t && t.id && t.name && !existingIds.has(t.id)) {
+      existing.push({ id: t.id, name: t.name });
+      existingIds.add(t.id);
+      addedCount++;
+    }
+  });
+  localStorage.setItem(LS_MY_TRIPS, JSON.stringify(existing.slice(0, 30)));
+  toast(addedCount ? `已匯入 ${addedCount} 個行程到這台裝置` : "這台裝置的清單已經是最新的了");
+  navigate("");
+}
+
+document.getElementById("sync-devices-btn").addEventListener("click", () => {
+  closeMenu();
+  renderSyncDevicesModal();
+});
+
+function renderSyncDevicesModal() {
+  const trips = getMyTrips();
+  const code = encodeSyncCode(trips);
+  const link = `${window.location.origin}${window.location.pathname}#/import/${encodeURIComponent(code)}`;
+
+  openModal("跨裝置同步清單", `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">
+      在這台裝置上，把下面的連結傳給你自己（例如用 LINE「傳給自己」），在另一台裝置打開，就能把目前的 ${trips.length} 個行程一次加進那台裝置的清單。
+    </p>
+    <div class="form-row">
+      <label>同步連結</label>
+      <input type="text" id="sync-link" readonly value="${escapeHtml(link)}" onclick="this.select()">
+    </div>
+    <button class="secondary-btn full-width" id="copy-sync-link-btn">📋 複製連結</button>
+
+    <div style="margin:20px 0 12px;border-top:1px dashed var(--border);"></div>
+
+    <p style="font-size:13px;color:var(--text-muted);">或者，如果你手上已經有別台裝置給你的同步代碼／連結，貼在這裡匯入：</p>
+    <div class="form-row" style="display:flex;gap:8px;">
+      <input type="text" id="import-code-input" placeholder="貼上同步連結或代碼" style="flex:1;">
+      <button class="primary-btn" id="import-code-btn">匯入</button>
+    </div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="sync-close-btn">關閉</button>
+    </div>
+  `);
+  document.getElementById("sync-close-btn").onclick = closeModal;
+  document.getElementById("copy-sync-link-btn").addEventListener("click", () => {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(link).then(() => toast("連結已複製"));
+    } else {
+      document.getElementById("sync-link").select();
+      toast("請手動複製上方連結");
+    }
+  });
+  document.getElementById("import-code-btn").addEventListener("click", () => {
+    const raw = document.getElementById("import-code-input").value.trim();
+    if (!raw) return;
+    let code = raw;
+    const m = raw.match(/import\/([^/?#]+)/);
+    if (m) code = decodeURIComponent(m[1]);
+    closeModal();
+    importSyncCode(code);
+  });
+}
 
 // ------------------------------------------------------------
 // 歡迎頁（尚未選擇行程）
@@ -709,22 +1046,14 @@ function renderTripHome() {
       <button class="tab-btn ${state.tripSection === "expenses" ? "active" : ""}" id="tab-expenses">💰 記帳與分帳</button>
     </div>
     ${!canEditItinerary() ? `<div class="readonly-banner">你目前是唯讀身份，可以瀏覽行程、許願池留言與記帳，但無法新增或編輯行程內容。</div>` : ""}
-    <div class="day-tabs" id="day-tabs"></div>
+    <div id="day-selector-wrap"></div>
     <div id="day-content"></div>
   `;
 
   document.getElementById("tab-itinerary").onclick = () => navigate(`#/trip/${state.tripId}${state.currentDayId ? "/day/" + state.currentDayId : ""}`);
   document.getElementById("tab-expenses").onclick = () => navigate(`#/trip/${state.tripId}/expenses`);
 
-  const dayTabsEl = document.getElementById("day-tabs");
-  dayTabsEl.innerHTML = state.days.map((d) => `
-    <button class="day-tab ${d.id === state.currentDayId ? "active" : ""}" data-dayid="${d.id}">${escapeHtml(d.title)}</button>
-  `).join("") + (canEditItinerary() ? `<button class="day-tab" id="add-day-tab">＋ 新增天數</button>` : "");
-  dayTabsEl.querySelectorAll("[data-dayid]").forEach((btn) => {
-    btn.addEventListener("click", () => selectDay(btn.dataset.dayid));
-  });
-  const addDayBtn = document.getElementById("add-day-tab");
-  if (addDayBtn) addDayBtn.addEventListener("click", renderAddDayModal);
+  renderDaySelector(document.getElementById("day-selector-wrap"), day);
 
   const contentEl = document.getElementById("day-content");
   if (!day) {
@@ -786,6 +1115,52 @@ function renderTripHome() {
       });
     });
   }
+}
+
+function dayIndexLabel(dayId) {
+  const idx = state.days.findIndex((d) => d.id === dayId);
+  return idx >= 0 ? idx + 1 : "?";
+}
+
+function renderDaySelector(container, day) {
+  if (!state.days.length) {
+    container.innerHTML = "";
+    return;
+  }
+  container.innerHTML = `
+    <button class="day-selector-btn" id="day-selector-btn">
+      <span class="day-selector-num">Day ${dayIndexLabel(state.currentDayId)}</span>
+      <span class="day-selector-title">${day ? escapeHtml(day.title) : "選擇天數"}</span>
+      ${day && day.date ? `<span class="day-selector-date">${escapeHtml(day.date)}</span>` : ""}
+      <span class="day-selector-chevron">▾</span>
+    </button>
+  `;
+  document.getElementById("day-selector-btn").addEventListener("click", renderDaySelectSheet);
+}
+
+function renderDaySelectSheet() {
+  openModal("選擇天數", `
+    <div class="day-select-list">
+      ${state.days.map((d, i) => `
+        <button class="day-select-item ${d.id === state.currentDayId ? "active" : ""}" data-dayid="${d.id}">
+          <span class="day-select-num">${i + 1}</span>
+          <span class="day-select-text">
+            <span class="day-select-title">${escapeHtml(d.title)}</span>
+            ${d.date ? `<span class="day-select-date">${escapeHtml(d.date)}</span>` : ""}
+          </span>
+        </button>
+      `).join("")}
+    </div>
+    ${canEditItinerary() ? `<button class="secondary-btn full-width" id="sheet-add-day-btn" style="margin-top:10px;">＋ 新增天數</button>` : ""}
+  `);
+  document.querySelectorAll("#modal-box .day-select-item").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      closeModal();
+      selectDay(btn.dataset.dayid);
+    });
+  });
+  const addBtn = document.getElementById("sheet-add-day-btn");
+  if (addBtn) addBtn.addEventListener("click", () => { closeModal(); renderAddDayModal(); });
 }
 
 function openConfirm(message, onConfirm) {
@@ -1147,9 +1522,10 @@ function computeBalances(expenses, members) {
   const balance = {};
   members.forEach((m) => (balance[m.id] = 0));
   expenses.forEach((e) => {
+    const amt = e.amountTWDCents != null ? e.amountTWDCents : e.amountCents;
     if (!(e.payerId in balance)) balance[e.payerId] = 0;
-    balance[e.payerId] += e.amountCents;
-    const share = e.amountCents / e.splitWith.length;
+    balance[e.payerId] += amt;
+    const share = amt / e.splitWith.length;
     e.splitWith.forEach((mid) => {
       if (!(mid in balance)) balance[mid] = 0;
       balance[mid] -= share;
@@ -1216,7 +1592,7 @@ function renderExpensesPage() {
         <div class="balance-row">
           <span>${escapeHtml(m.name)}</span>
           <span style="color:${balance[m.id] >= 0 ? "#16a34a" : "var(--danger)"};font-weight:600;">
-            ${balance[m.id] > 50 ? `應收 $${fmtMoney(balance[m.id])}` : balance[m.id] < -50 ? `應付 $${fmtMoney(Math.abs(balance[m.id]))}` : "已結清"}
+            ${balance[m.id] > 50 ? `應收 NT$${fmtMoney(balance[m.id])}` : balance[m.id] < -50 ? `應付 NT$${fmtMoney(Math.abs(balance[m.id]))}` : "已結清"}
           </span>
         </div>
       `).join("")}
@@ -1226,7 +1602,7 @@ function renderExpensesPage() {
           ${transactions.map((t) => `
             <div class="balance-row">
               <span>${escapeHtml(memberName(t.from))} <span class="settle-arrow">→</span> ${escapeHtml(memberName(t.to))}</span>
-              <span style="font-weight:700;">$${fmtMoney(t.amountCents)}</span>
+              <span style="font-weight:700;">NT$${fmtMoney(t.amountCents)}</span>
             </div>
           `).join("")}
         </div>
@@ -1238,18 +1614,22 @@ function renderExpensesPage() {
     <div id="expense-list">
       ${dateKeys.length ? dateKeys.map((dk) => {
         const items = byDate[dk];
-        const subtotal = items.reduce((s, e) => s + e.amountCents, 0);
+        const subtotal = items.reduce((s, e) => s + (e.amountTWDCents != null ? e.amountTWDCents : e.amountCents), 0);
         return `
           <div style="margin-bottom:16px;">
             <div style="display:flex;justify-content:space-between;font-size:13px;color:var(--text-muted);margin-bottom:6px;">
-              <span>${escapeHtml(dk)}</span><span>小計 $${fmtMoney(subtotal)}</span>
+              <span>${escapeHtml(dk)}</span><span>小計 NT$${fmtMoney(subtotal)}</span>
             </div>
-            ${items.map((e) => `
+            ${items.map((e) => {
+              const currency = e.currency || "TWD";
+              const isForeign = currency !== "TWD";
+              return `
               <div class="expense-item" data-id="${e.id}">
                 <div class="expense-top">
-                  <span>${escapeHtml(e.title)}</span>
-                  <span class="expense-amount">$${fmtMoney(e.amountCents)}</span>
+                  <span>${escapeHtml(e.title)} ${isForeign ? `<span class="currency-tag">${escapeHtml(currency)}</span>` : ""}</span>
+                  <span class="expense-amount">${fmtCurrencyAmt(e.amountCents, currency)}</span>
                 </div>
+                ${isForeign ? `<div class="expense-fx">≈ NT$${fmtMoney(e.amountTWDCents)}（匯率 1 ${escapeHtml(currency)} ≈ ${(e.rateToTWD || 0).toFixed(4)} TWD）</div>` : ""}
                 <div class="expense-meta">
                   ${escapeHtml(memberName(e.payerId))} 先付款，由 ${e.splitWith.map(memberName).map(escapeHtml).join("、")} 分攤
                   ${e.note ? ` · ${escapeHtml(e.note)}` : ""}
@@ -1258,7 +1638,8 @@ function renderExpensesPage() {
                   <span class="danger-btn small-btn del-expense-btn" data-id="${e.id}">刪除</span>
                 </div>
               </div>
-            `).join("")}
+            `;
+            }).join("")}
           </div>
         `;
       }).join("") : `<div class="empty-hint">還沒有任何消費紀錄</div>`}
@@ -1280,11 +1661,33 @@ function renderExpensesPage() {
 function renderAddExpenseModal() {
   const members = state.trip.members;
   const my = myMember();
+  const currencies = tripCurrencies();
+  const multiCurrency = currencies.length > 1;
   let splitWith = members.map((m) => m.id); // 預設全員分攤
+  let manualRate = null; // 若自動查詢匯率失敗，改用手動輸入
 
   openModal("新增消費", `
     <div class="form-row"><label>項目名稱</label><input type="text" id="exp-title" placeholder="例如：午餐"></div>
-    <div class="form-row"><label>金額（元）</label><input type="number" id="exp-amount" min="0" step="1" placeholder="0"></div>
+    <div class="form-row" style="display:flex;gap:8px;">
+      <div style="flex:1;">
+        <label>金額</label>
+        <input type="number" id="exp-amount" min="0" step="1" placeholder="0">
+      </div>
+      ${multiCurrency ? `
+        <div style="width:120px;">
+          <label>幣別</label>
+          <select id="exp-currency">
+            ${currencies.map((c) => `<option value="${c}" ${c === "TWD" ? "selected" : ""}>${escapeHtml(c)}</option>`).join("")}
+          </select>
+        </div>
+      ` : `<input type="hidden" id="exp-currency" value="TWD">`}
+    </div>
+    <div id="manual-rate-row" class="hidden">
+      <div class="form-row">
+        <label>查不到當日匯率，請手動輸入：1 <span id="manual-rate-currency"></span> = 多少台幣？</label>
+        <input type="number" id="exp-manual-rate" min="0" step="0.0001" placeholder="例如：0.21">
+      </div>
+    </div>
     <div class="form-row">
       <label>由誰先付款</label>
       <select id="exp-payer">
@@ -1319,21 +1722,106 @@ function renderAddExpenseModal() {
     });
   });
 
+  // 切換幣別時，把手動匯率欄位收起來（幣別變了，之前查到的匯率就不算數了）
+  const currencySelect = document.getElementById("exp-currency");
+  if (currencySelect.tagName === "SELECT") {
+    currencySelect.addEventListener("change", () => {
+      document.getElementById("manual-rate-row").classList.add("hidden");
+      manualRate = null;
+    });
+  }
+
   document.getElementById("exp-cancel").onclick = closeModal;
   document.getElementById("exp-confirm").onclick = async () => {
     const title = document.getElementById("exp-title").value.trim();
     const amount = parseFloat(document.getElementById("exp-amount").value);
+    const currency = document.getElementById("exp-currency").value;
     const payerId = document.getElementById("exp-payer").value;
     const date = document.getElementById("exp-date").value;
     const note = document.getElementById("exp-note").value.trim();
     if (!title) return toast("請輸入項目名稱");
     if (!amount || amount <= 0) return toast("請輸入正確金額");
     if (!splitWith.length) return toast("請至少選擇一位分攤者");
+
+    const amountCents = Math.round(amount * 100);
+    let rateToTWD = 1;
+
+    if (currency !== "TWD") {
+      const manualInput = document.getElementById("exp-manual-rate");
+      const manualVal = manualInput ? parseFloat(manualInput.value) : NaN;
+      if (!document.getElementById("manual-rate-row").classList.contains("hidden") && manualVal > 0) {
+        rateToTWD = manualVal;
+      } else {
+        const btn = document.getElementById("exp-confirm");
+        btn.disabled = true;
+        btn.textContent = "查詢匯率中...";
+        const rate = await fetchExchangeRate(date, currency);
+        btn.disabled = false;
+        btn.textContent = "新增";
+        if (rate) {
+          rateToTWD = rate;
+        } else {
+          document.getElementById("manual-rate-currency").textContent = currency;
+          document.getElementById("manual-rate-row").classList.remove("hidden");
+          toast(`查不到 ${date} 的 ${currency} 匯率，請手動輸入後再按一次「新增」`);
+          return;
+        }
+      }
+    }
+
+    const amountTWDCents = Math.round(amountCents * rateToTWD);
     closeModal();
-    await addExpense({ title, amountCents: Math.round(amount * 100), payerId, splitWith, date, note });
+    await addExpense({ title, amountCents, currency, rateToTWD, amountTWDCents, payerId, splitWith, date, note });
   };
 }
 
+
+// ------------------------------------------------------------
+// 貨幣設定（僅統籌人 owner 可操作）
+// ------------------------------------------------------------
+function renderCurrencySettingsModal() {
+  let selected = new Set(tripCurrencies());
+  selected.add("TWD"); // 結算一律以台幣為準，所以永遠包含
+
+  openModal("貨幣設定", `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">
+      勾選這趟行程會用到的貨幣。新增消費時，只會列出這裡勾選的貨幣可以選。台幣是結算的基準幣別，會固定顯示。
+    </p>
+    <div class="checkbox-group" id="currency-checkbox-group">
+      ${CURRENCY_OPTIONS.map((c) => `
+        <div class="checkbox-chip ${selected.has(c.code) ? "checked" : ""} ${c.code === "TWD" ? "locked" : ""}" data-code="${c.code}">
+          ${escapeHtml(currencyLabel(c.code))}
+        </div>
+      `).join("")}
+    </div>
+    <p style="font-size:12px;color:var(--text-muted);margin-top:10px;">
+      非台幣消費會在新增當下，依「消費日期」自動查詢當天匯率換算成台幣一起記錄；若查詢失敗，會請新增消費的人手動輸入匯率。
+    </p>
+    <div class="form-actions">
+      <button class="secondary-btn" id="currency-cancel">取消</button>
+      <button class="primary-btn" id="currency-save">儲存</button>
+    </div>
+  `);
+  document.querySelectorAll("#currency-checkbox-group .checkbox-chip").forEach((chip) => {
+    if (chip.dataset.code === "TWD") return; // 台幣鎖定，不能取消
+    chip.addEventListener("click", () => {
+      const code = chip.dataset.code;
+      if (selected.has(code)) {
+        selected.delete(code);
+        chip.classList.remove("checked");
+      } else {
+        selected.add(code);
+        chip.classList.add("checked");
+      }
+    });
+  });
+  document.getElementById("currency-cancel").onclick = closeModal;
+  document.getElementById("currency-save").onclick = async () => {
+    await updateTripCurrencies(Array.from(selected));
+    closeModal();
+    toast("已更新貨幣設定");
+  };
+}
 
 // ------------------------------------------------------------
 // 管理成員與權限（僅統籌人 owner 可操作）
