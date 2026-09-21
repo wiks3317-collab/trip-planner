@@ -210,6 +210,21 @@ function applyAppearance(settings) {
 applyAppearance(loadAppearance());
 
 // ------------------------------------------------------------
+// 行程背景圖片（存在 Firestore 的行程資料裡，所以每個看行程的人都會看到同一張）
+// ------------------------------------------------------------
+function applyTripBackground(url, dim) {
+  const layer = document.getElementById("bg-image-layer");
+  if (url) {
+    const d = Math.min(Math.max(dim ?? 30, 0), 85) / 100;
+    layer.style.backgroundImage = `linear-gradient(rgba(0,0,0,${d}), rgba(0,0,0,${d})), url("${url.replace(/"/g, '\\"')}")`;
+    document.body.classList.add("has-bg-image");
+  } else {
+    layer.style.backgroundImage = "";
+    document.body.classList.remove("has-bg-image");
+  }
+}
+
+// ------------------------------------------------------------
 // 全域狀態
 // ------------------------------------------------------------
 const state = {
@@ -321,6 +336,7 @@ async function route() {
     clearAllUnsub();
     state.tripId = null;
     state.trip = null;
+    applyTripBackground(null);
     renderWelcome();
     renderTripMenu();
     updateHeader();
@@ -383,11 +399,13 @@ async function loadTrip(tripId) {
   }
   state.trip = { id: tripId, ...snap.data() };
   saveMyTrip(tripId, state.trip.name);
+  applyTripBackground(state.trip.backgroundImageUrl, state.trip.backgroundDim);
 
   state.unsub.trip = onSnapshot(tripRef, (s) => {
     if (!s.exists()) return;
     state.trip = { id: tripId, ...s.data() };
     updateMyTripName(tripId, state.trip.name);
+    applyTripBackground(state.trip.backgroundImageUrl, state.trip.backgroundDim);
     updateHeader();
     // 若目前畫面跟成員/權限有關，重新渲染目前頁面
     route();
@@ -412,6 +430,10 @@ async function updateTripMembers(members) {
 
 async function updateTripCurrencies(currencies) {
   await updateDoc(doc(db, "trips", state.tripId), { currencies });
+}
+
+async function updateTripBackground(url, dim) {
+  await updateDoc(doc(db, "trips", state.tripId), { backgroundImageUrl: url || "", backgroundDim: dim });
 }
 
 async function renameTrip(name) {
@@ -476,6 +498,16 @@ async function deleteDay(dayId) {
   batch.delete(doc(db, "trips", state.tripId, "days", dayId));
   await batch.commit();
 }
+async function moveDay(idx, delta) {
+  const arr = state.days;
+  const j = idx + delta;
+  if (j < 0 || j >= arr.length) return;
+  const a = arr[idx], b = arr[j];
+  const batch = writeBatch(db);
+  batch.update(doc(db, "trips", state.tripId, "days", a.id), { order: b.order });
+  batch.update(doc(db, "trips", state.tripId, "days", b.id), { order: a.order });
+  await batch.commit();
+}
 
 // ------------------------------------------------------------
 // Firestore：景點 / 時段（spots）
@@ -509,6 +541,16 @@ async function deleteSpot(dayId, spotId) {
   const batch = writeBatch(db);
   wishesSnap.docs.forEach((d) => batch.delete(d.ref));
   batch.delete(doc(db, "trips", state.tripId, "days", dayId, "spots", spotId));
+  await batch.commit();
+}
+async function moveSpot(dayId, idx, delta) {
+  const arr = state.spots;
+  const j = idx + delta;
+  if (j < 0 || j >= arr.length) return;
+  const a = arr[idx], b = arr[j];
+  const batch = writeBatch(db);
+  batch.update(doc(db, "trips", state.tripId, "days", dayId, "spots", a.id), { order: b.order });
+  batch.update(doc(db, "trips", state.tripId, "days", dayId, "spots", b.id), { order: a.order });
   await batch.commit();
 }
 
@@ -575,6 +617,7 @@ function updateHeader() {
   const nameEl = document.getElementById("header-trip-name");
   const badge = document.getElementById("current-member-badge");
   const shareBtn = document.getElementById("share-btn");
+  const renameBtn = document.getElementById("rename-trip-btn");
   if (state.trip) {
     nameEl.textContent = state.trip.name;
     const m = myMember();
@@ -583,14 +626,37 @@ function updateHeader() {
       : "選擇你的身份 ▾";
     badge.classList.remove("hidden");
     shareBtn.classList.remove("hidden");
+    renameBtn.classList.toggle("hidden", !isOwner());
   } else {
     nameEl.textContent = "旅行行程規劃工具";
     badge.classList.add("hidden");
     shareBtn.classList.add("hidden");
+    renameBtn.classList.add("hidden");
   }
 }
 
 document.getElementById("current-member-badge").addEventListener("click", renderMemberSwitchModal);
+
+document.getElementById("rename-trip-btn").addEventListener("click", () => {
+  if (!state.trip) return;
+  openModal("重新命名行程", `
+    <div class="form-row"><label>行程名稱</label><input type="text" id="rename-trip-input" value="${escapeHtml(state.trip.name)}"></div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="rename-cancel">取消</button>
+      <button class="primary-btn" id="rename-confirm">儲存</button>
+    </div>
+  `);
+  const input = document.getElementById("rename-trip-input");
+  input.focus();
+  input.select();
+  document.getElementById("rename-cancel").onclick = closeModal;
+  document.getElementById("rename-confirm").onclick = async () => {
+    const name = input.value.trim();
+    if (!name) return toast("請輸入行程名稱");
+    await renameTrip(name);
+    closeModal();
+  };
+});
 
 function renderMemberSwitchModal() {
   if (!state.trip) return;
@@ -727,7 +793,7 @@ function closeMenu() {
 }
 
 function renderTripMenu() {
-  ["manage-members-menu-btn", "currency-settings-menu-btn"].forEach((id) => {
+  ["manage-members-menu-btn", "currency-settings-menu-btn", "background-settings-menu-btn"].forEach((id) => {
     const el = document.getElementById(id);
     if (el) el.remove();
   });
@@ -742,6 +808,7 @@ function renderTripMenu() {
       btn.addEventListener("click", () => { closeMenu(); onClick(); });
       document.getElementById("new-trip-btn").insertAdjacentElement("beforebegin", btn);
     };
+    mkBtn("background-settings-menu-btn", "🖼️ 背景圖片設定", renderBackgroundSettingsModal);
     mkBtn("currency-settings-menu-btn", "💱 貨幣設定", renderCurrencySettingsModal);
     mkBtn("manage-members-menu-btn", "👥 管理成員與權限", renderManageMembersModal);
   }
@@ -1100,18 +1167,32 @@ function renderTripHome() {
   }
 
   const spotListEl = document.getElementById("spot-list");
+  const canEdit = canEditItinerary();
   if (!state.spots.length) {
     spotListEl.innerHTML = `<div class="empty-hint">這天還沒有安排景點</div>`;
   } else {
-    spotListEl.innerHTML = state.spots.map((s) => `
+    spotListEl.innerHTML = state.spots.map((s, i) => `
       <div class="spot-item" data-spotid="${s.id}">
+        ${canEdit ? `
+          <div class="reorder-col">
+            <button class="reorder-btn" data-move="up" data-idx="${i}" ${i === 0 ? "disabled" : ""}>▲</button>
+            <button class="reorder-btn" data-move="down" data-idx="${i}" ${i === state.spots.length - 1 ? "disabled" : ""}>▼</button>
+          </div>
+        ` : ""}
         <div class="spot-time">${escapeHtml(s.time || "")}</div>
-        <div class="spot-title">${escapeHtml(s.title)}</div>
-        <div>›</div>
+        <div class="spot-title" data-nav="${s.id}">${escapeHtml(s.title)}</div>
+        <div data-nav="${s.id}">›</div>
       </div>`).join("");
-    spotListEl.querySelectorAll("[data-spotid]").forEach((el) => {
+    spotListEl.querySelectorAll("[data-nav]").forEach((el) => {
       el.addEventListener("click", () => {
-        navigate(`#/trip/${state.tripId}/day/${day.id}/spot/${el.dataset.spotid}`);
+        navigate(`#/trip/${state.tripId}/day/${day.id}/spot/${el.dataset.nav}`);
+      });
+    });
+    spotListEl.querySelectorAll(".reorder-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const idx = Number(btn.dataset.idx);
+        moveSpot(day.id, idx, btn.dataset.move === "up" ? -1 : 1);
       });
     });
   }
@@ -1139,24 +1220,38 @@ function renderDaySelector(container, day) {
 }
 
 function renderDaySelectSheet() {
+  const canEdit = canEditItinerary();
   openModal("選擇天數", `
     <div class="day-select-list">
       ${state.days.map((d, i) => `
-        <button class="day-select-item ${d.id === state.currentDayId ? "active" : ""}" data-dayid="${d.id}">
-          <span class="day-select-num">${i + 1}</span>
-          <span class="day-select-text">
+        <div class="day-select-item ${d.id === state.currentDayId ? "active" : ""}" data-dayid="${d.id}">
+          ${canEdit ? `
+            <div class="reorder-col">
+              <button class="reorder-btn" data-move="up" data-idx="${i}" ${i === 0 ? "disabled" : ""}>▲</button>
+              <button class="reorder-btn" data-move="down" data-idx="${i}" ${i === state.days.length - 1 ? "disabled" : ""}>▼</button>
+            </div>
+          ` : ""}
+          <span class="day-select-num" data-nav="${d.id}">${i + 1}</span>
+          <span class="day-select-text" data-nav="${d.id}">
             <span class="day-select-title">${escapeHtml(d.title)}</span>
             ${d.date ? `<span class="day-select-date">${escapeHtml(d.date)}</span>` : ""}
           </span>
-        </button>
+        </div>
       `).join("")}
     </div>
-    ${canEditItinerary() ? `<button class="secondary-btn full-width" id="sheet-add-day-btn" style="margin-top:10px;">＋ 新增天數</button>` : ""}
+    ${canEdit ? `<button class="secondary-btn full-width" id="sheet-add-day-btn" style="margin-top:10px;">＋ 新增天數</button>` : ""}
   `);
-  document.querySelectorAll("#modal-box .day-select-item").forEach((btn) => {
-    btn.addEventListener("click", () => {
+  document.querySelectorAll("#modal-box [data-nav]").forEach((el) => {
+    el.addEventListener("click", () => {
       closeModal();
-      selectDay(btn.dataset.dayid);
+      selectDay(el.dataset.nav);
+    });
+  });
+  document.querySelectorAll("#modal-box .reorder-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const idx = Number(btn.dataset.idx);
+      moveDay(idx, btn.dataset.move === "up" ? -1 : 1);
     });
   });
   const addBtn = document.getElementById("sheet-add-day-btn");
@@ -1779,6 +1874,62 @@ function renderAddExpenseModal() {
 // ------------------------------------------------------------
 // 貨幣設定（僅統籌人 owner 可操作）
 // ------------------------------------------------------------
+// ------------------------------------------------------------
+// 背景圖片設定（僅統籌人 owner 可操作；存在行程資料裡，大家看到的都一樣）
+// ------------------------------------------------------------
+function renderBackgroundSettingsModal() {
+  const currentUrl = state.trip.backgroundImageUrl || "";
+  const currentDim = state.trip.backgroundDim ?? 30;
+
+  openModal("背景圖片設定", `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">
+      設定整個行程頁面的背景圖片，貼上圖片網址即可（跟景點插圖一樣是用連結，不是上傳檔案）。這是存在行程資料裡的，所以同行的每個人打開這個行程都會看到同一張背景。
+    </p>
+    <div class="form-row">
+      <label>圖片網址</label>
+      <input type="text" id="bg-url-input" placeholder="https://..." value="${escapeHtml(currentUrl)}">
+    </div>
+    <div class="form-row">
+      <label>背景暗化程度（讓文字更好讀）</label>
+      <input type="range" id="bg-dim-input" min="0" max="80" step="5" value="${currentDim}" style="width:100%;">
+    </div>
+    <div id="bg-preview" style="height:120px;border-radius:var(--radius-sm);border:1px solid var(--border);background-size:cover;background-position:center;margin-bottom:6px;"></div>
+    <div class="form-actions">
+      <button class="danger-btn" id="bg-clear-btn">清除背景</button>
+      <button class="secondary-btn" id="bg-cancel-btn">取消</button>
+      <button class="primary-btn" id="bg-save-btn">儲存</button>
+    </div>
+  `);
+
+  const preview = document.getElementById("bg-preview");
+  const urlInput = document.getElementById("bg-url-input");
+  const dimInput = document.getElementById("bg-dim-input");
+  const updatePreview = () => {
+    const url = urlInput.value.trim();
+    const dim = Number(dimInput.value);
+    preview.style.backgroundImage = url
+      ? `linear-gradient(rgba(0,0,0,${dim / 100}), rgba(0,0,0,${dim / 100})), url("${url.replace(/"/g, '\\"')}")`
+      : "none";
+  };
+  updatePreview();
+  urlInput.addEventListener("input", updatePreview);
+  dimInput.addEventListener("input", updatePreview);
+
+  document.getElementById("bg-cancel-btn").onclick = closeModal;
+  document.getElementById("bg-clear-btn").onclick = async () => {
+    await updateTripBackground("", 30);
+    closeModal();
+    toast("已清除背景圖片");
+  };
+  document.getElementById("bg-save-btn").onclick = async () => {
+    const url = urlInput.value.trim();
+    const dim = Number(dimInput.value);
+    await updateTripBackground(url, dim);
+    closeModal();
+    toast(url ? "已更新背景圖片" : "已清除背景圖片");
+  };
+}
+
 function renderCurrencySettingsModal() {
   let selected = new Set(tripCurrencies());
   selected.add("TWD"); // 結算一律以台幣為準，所以永遠包含
