@@ -4,6 +4,9 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>旅行行程規劃工具</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&family=Noto+Serif+TC:wght@400;600;700&family=LXGW+WenKai+TC:wght@400;700&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -15,8 +18,9 @@
       <span id="header-trip-name">旅行行程規劃工具</span>
     </div>
     <div id="header-actions">
-      <span id="current-member-badge" class="hidden"></span>
-      <button id="share-btn" class="icon-btn hidden" title="分享此行程">🔗 分享</button>
+      <button id="current-member-badge" class="hidden" title="點一下可切換身份"></button>
+      <button id="appearance-btn" class="icon-btn" title="外觀設定">🎨</button>
+      <button id="share-btn" class="icon-btn hidden" title="分享此行程">🔗</button>
     </div>
   </header>
 
@@ -31,6 +35,7 @@
     <button id="new-trip-btn" class="primary-btn full-width">＋ 建立新行程</button>
     <div class="menu-footer">
       <button id="join-trip-btn" class="secondary-btn full-width">用連結／代碼加入行程</button>
+      <button id="sync-devices-btn" class="secondary-btn full-width" style="margin-top:8px;">🔄 跨裝置同步清單</button>
     </div>
   </aside>
 
