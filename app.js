@@ -459,6 +459,28 @@ async function updateTripCurrencies(currencies) {
   await updateDoc(doc(db, "trips", state.tripId), { currencies });
 }
 
+// 把某個幣別最新查到（或手動輸入）的匯率存回行程資料，這樣同行每個人看到的都是同一組匯率
+async function saveTripFxRate(currency, rate, manual) {
+  await updateDoc(doc(db, "trips", state.tripId), {
+    [`fxRates.${currency}`]: { rate, updatedAt: todayStr(), manual: !!manual },
+  });
+}
+
+function tripFxRates() {
+  return (state.trip && state.trip.fxRates) || {};
+}
+
+// 嘗試自動查詢某幣別「最新」匯率（不指定日期，避免抓不到今天還沒公布的資料）並存回行程
+async function refreshFxRate(currency) {
+  if (currency === "TWD") return true;
+  const rate = await fetchExchangeRate("latest", currency);
+  if (rate) {
+    await saveTripFxRate(currency, rate, false);
+    return true;
+  }
+  return false;
+}
+
 async function updateTripBackground(url, dim) {
   await updateDoc(doc(db, "trips", state.tripId), { backgroundImageUrl: url || "", backgroundDim: dim });
 }
@@ -626,9 +648,9 @@ function subscribeExpenses() {
   });
 }
 
-async function addExpense({ title, amountCents, currency, rateToTWD, amountTWDCents, payerId, splitWith, date, note }) {
+async function addExpense({ title, amountCents, currency, payerId, splitWith, date, note }) {
   await addDoc(collection(db, "trips", state.tripId, "expenses"), {
-    title, amountCents, currency, rateToTWD, amountTWDCents, payerId, splitWith, date, note: note || "",
+    title, amountCents, currency, payerId, splitWith, date, note: note || "",
     createdAt: serverTimestamp(),
   });
 }
@@ -1639,27 +1661,47 @@ function renderEditSpotMetaModal(dayId, spot) {
 // ------------------------------------------------------------
 // 記帳與分帳結算邏輯（內部一律用「分」為單位計算，避免浮點誤差）
 // ------------------------------------------------------------
-function computeBalances(expenses, members) {
-  const balance = {};
-  members.forEach((m) => (balance[m.id] = 0));
+// 先按幣別分開算「每個人在這個幣別裡是多收還是多付」，完全不牽涉匯率
+function computeBalancesByCurrency(expenses, members) {
+  const byCurrency = {};
   expenses.forEach((e) => {
-    const amt = e.amountTWDCents != null ? e.amountTWDCents : e.amountCents;
+    const currency = e.currency || "TWD";
+    const balance = (byCurrency[currency] = byCurrency[currency] || {});
+    members.forEach((m) => { if (!(m.id in balance)) balance[m.id] = 0; });
     if (!(e.payerId in balance)) balance[e.payerId] = 0;
-    balance[e.payerId] += amt;
-    const share = amt / e.splitWith.length;
+    balance[e.payerId] += e.amountCents;
+    const share = e.amountCents / e.splitWith.length;
     e.splitWith.forEach((mid) => {
       if (!(mid in balance)) balance[mid] = 0;
       balance[mid] -= share;
     });
   });
-  return balance;
+  return byCurrency;
 }
 
-function computeSettlement(expenses, members) {
-  const balance = computeBalances(expenses, members);
+// 把每個幣別的餘額，用（存在行程資料裡的）匯率換算成台幣後加總，
+// 缺匯率的幣別會列在 missingCurrencies，該幣別金額暫不計入 balanceTWD
+function computeSettlement(expenses, members, fxRates) {
+  const byCurrency = computeBalancesByCurrency(expenses, members);
+  const balanceTWD = {};
+  members.forEach((m) => (balanceTWD[m.id] = 0));
+  const missingCurrencies = [];
+
+  Object.entries(byCurrency).forEach(([currency, balance]) => {
+    const rate = currency === "TWD" ? 1 : fxRates[currency]?.rate;
+    if (!rate) {
+      missingCurrencies.push(currency);
+      return;
+    }
+    Object.entries(balance).forEach(([id, amt]) => {
+      if (!(id in balanceTWD)) balanceTWD[id] = 0;
+      balanceTWD[id] += amt * rate;
+    });
+  });
+
   const creditors = [];
   const debtors = [];
-  Object.entries(balance).forEach(([id, amt]) => {
+  Object.entries(balanceTWD).forEach(([id, amt]) => {
     const rounded = Math.round(amt);
     if (rounded > 0) creditors.push({ id, amt: rounded });
     else if (rounded < 0) debtors.push({ id, amt: -rounded });
@@ -1679,7 +1721,7 @@ function computeSettlement(expenses, members) {
     if (c.amt === 0) ci++;
     if (d.amt === 0) di++;
   }
-  return { balance, transactions };
+  return { balanceTWD, transactions, missingCurrencies, byCurrency };
 }
 
 function memberName(id) {
@@ -1690,6 +1732,10 @@ function memberName(id) {
 function renderExpensesPage() {
   const root = document.getElementById("app-root");
   const members = state.trip.members;
+  const fxRates = tripFxRates();
+
+  // 用到的外幣（有消費紀錄的），排除台幣
+  const usedCurrencies = Array.from(new Set(state.expenses.map((e) => e.currency || "TWD"))).filter((c) => c !== "TWD");
 
   // 依日期分組
   const byDate = {};
@@ -1699,7 +1745,7 @@ function renderExpensesPage() {
   });
   const dateKeys = Object.keys(byDate).sort();
 
-  const { balance, transactions } = computeSettlement(state.expenses, members);
+  const { balanceTWD, transactions, missingCurrencies } = computeSettlement(state.expenses, members, fxRates);
 
   root.innerHTML = `
     <div class="tabs">
@@ -1707,13 +1753,31 @@ function renderExpensesPage() {
       <button class="tab-btn active" id="tab-expenses">💰 記帳與分帳</button>
     </div>
 
+    ${usedCurrencies.length ? `
+      <div class="fx-status-card">
+        <div class="fx-status-title">目前使用的幣別匯率</div>
+        ${usedCurrencies.map((c) => {
+          const info = fxRates[c];
+          return `<div class="fx-status-row">
+            <span>1 ${escapeHtml(c)} ≈</span>
+            <span>${info ? `${info.rate.toFixed(4)} TWD${info.manual ? "（手動輸入）" : ""}　<span class="fx-updated">${escapeHtml(info.updatedAt)} 更新</span>` : `<span class="fx-missing">尚未取得</span>`}</span>
+          </div>`;
+        }).join("")}
+        <button class="secondary-btn small-btn" id="refresh-fx-btn" style="margin-top:8px;">🔄 查詢／更新匯率</button>
+      </div>
+    ` : ""}
+
+    ${missingCurrencies.length ? `
+      <div class="readonly-banner">⚠️ ${missingCurrencies.map(escapeHtml).join("、")} 還沒有匯率資料，下面的結算金額暫時還沒把這些幣別的消費算進去。按上面「🔄 查詢／更新匯率」試試，或用同一顆按鈕手動輸入。</div>
+    ` : ""}
+
     <div class="section-title">結算總覽</div>
     <div class="card">
       ${members.map((m) => `
         <div class="balance-row">
           <span>${escapeHtml(m.name)}</span>
-          <span style="color:${balance[m.id] >= 0 ? "#16a34a" : "var(--danger)"};font-weight:600;">
-            ${balance[m.id] > 50 ? `應收 NT$${fmtMoney(balance[m.id])}` : balance[m.id] < -50 ? `應付 NT$${fmtMoney(Math.abs(balance[m.id]))}` : "已結清"}
+          <span style="color:${balanceTWD[m.id] >= 0 ? "#16a34a" : "var(--danger)"};font-weight:600;">
+            ${balanceTWD[m.id] > 50 ? `應收 NT$${fmtMoney(balanceTWD[m.id])}` : balanceTWD[m.id] < -50 ? `應付 NT$${fmtMoney(Math.abs(balanceTWD[m.id]))}` : "已結清"}
           </span>
         </div>
       `).join("")}
@@ -1735,22 +1799,34 @@ function renderExpensesPage() {
     <div id="expense-list">
       ${dateKeys.length ? dateKeys.map((dk) => {
         const items = byDate[dk];
-        const subtotal = items.reduce((s, e) => s + (e.amountTWDCents != null ? e.amountTWDCents : e.amountCents), 0);
+        // 依幣別分別列小計（不同幣別不會混加）
+        const subtotalByCurrency = {};
+        items.forEach((e) => {
+          const c = e.currency || "TWD";
+          subtotalByCurrency[c] = (subtotalByCurrency[c] || 0) + e.amountCents;
+        });
+        const subtotalText = Object.entries(subtotalByCurrency)
+          .map(([c, cents]) => fmtCurrencyAmt(cents, c))
+          .join("　");
         return `
           <div style="margin-bottom:16px;">
             <div style="display:flex;justify-content:space-between;font-size:13px;color:var(--text-muted);margin-bottom:6px;">
-              <span>${escapeHtml(dk)}</span><span>小計 NT$${fmtMoney(subtotal)}</span>
+              <span>${escapeHtml(dk)}</span><span>小計 ${subtotalText}</span>
             </div>
             ${items.map((e) => {
               const currency = e.currency || "TWD";
               const isForeign = currency !== "TWD";
+              const rateInfo = fxRates[currency];
               return `
               <div class="expense-item" data-id="${e.id}">
                 <div class="expense-top">
                   <span>${escapeHtml(e.title)} ${isForeign ? `<span class="currency-tag">${escapeHtml(currency)}</span>` : ""}</span>
                   <span class="expense-amount">${fmtCurrencyAmt(e.amountCents, currency)}</span>
                 </div>
-                ${isForeign ? `<div class="expense-fx">≈ NT$${fmtMoney(e.amountTWDCents)}（匯率 1 ${escapeHtml(currency)} ≈ ${(e.rateToTWD || 0).toFixed(4)} TWD）</div>` : ""}
+                ${isForeign ? (rateInfo
+                  ? `<div class="expense-fx">≈ NT$${fmtMoney(Math.round(e.amountCents * rateInfo.rate))}（依 ${escapeHtml(rateInfo.updatedAt)} 匯率）</div>`
+                  : `<div class="expense-fx expense-fx-missing">尚未取得 ${escapeHtml(currency)} 匯率，還沒換算成台幣</div>`
+                ) : ""}
                 <div class="expense-meta">
                   ${escapeHtml(memberName(e.payerId))} 先付款，由 ${e.splitWith.map(memberName).map(escapeHtml).join("、")} 分攤
                   ${e.note ? ` · ${escapeHtml(e.note)}` : ""}
@@ -1770,6 +1846,8 @@ function renderExpensesPage() {
   document.getElementById("tab-itinerary").onclick = () => navigate(`#/trip/${state.tripId}${state.currentDayId ? "/day/" + state.currentDayId : ""}`);
   document.getElementById("tab-expenses").onclick = () => {};
   document.getElementById("add-expense-btn").addEventListener("click", renderAddExpenseModal);
+  const refreshBtn = document.getElementById("refresh-fx-btn");
+  if (refreshBtn) refreshBtn.addEventListener("click", () => handleRefreshRates(usedCurrencies));
   root.querySelectorAll(".del-expense-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       openConfirm("確定要刪除這筆消費紀錄嗎？", async () => {
@@ -1779,13 +1857,53 @@ function renderExpensesPage() {
   });
 }
 
+async function handleRefreshRates(currencies) {
+  const btn = document.getElementById("refresh-fx-btn");
+  if (btn) { btn.disabled = true; btn.textContent = "查詢中..."; }
+  const failed = [];
+  for (const c of currencies) {
+    const ok = await refreshFxRate(c);
+    if (!ok) failed.push(c);
+  }
+  if (btn) { btn.disabled = false; btn.textContent = "🔄 查詢／更新匯率"; }
+  if (failed.length) {
+    renderManualFxModal(failed);
+  } else {
+    toast("匯率已更新");
+  }
+}
+
+function renderManualFxModal(currencies) {
+  openModal("手動輸入匯率", `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">自動查詢暫時查不到以下幣別的匯率（常見原因：今天的資料還沒公布），可以先手動輸入，之後隨時可以再按「查詢／更新匯率」重新自動抓取。</p>
+    ${currencies.map((c) => `
+      <div class="form-row">
+        <label>1 ${escapeHtml(c)} = 多少台幣？</label>
+        <input type="number" min="0" step="0.0001" id="manual-fx-${escapeHtml(c)}" placeholder="例如：0.21">
+      </div>
+    `).join("")}
+    <div class="form-actions">
+      <button class="secondary-btn" id="manual-fx-cancel">取消</button>
+      <button class="primary-btn" id="manual-fx-save">儲存</button>
+    </div>
+  `);
+  document.getElementById("manual-fx-cancel").onclick = closeModal;
+  document.getElementById("manual-fx-save").onclick = async () => {
+    for (const c of currencies) {
+      const val = parseFloat(document.getElementById(`manual-fx-${c}`).value);
+      if (val > 0) await saveTripFxRate(c, val, true);
+    }
+    closeModal();
+    toast("已儲存手動匯率");
+  };
+}
+
 function renderAddExpenseModal() {
   const members = state.trip.members;
   const my = myMember();
   const currencies = tripCurrencies();
   const multiCurrency = currencies.length > 1;
   let splitWith = members.map((m) => m.id); // 預設全員分攤
-  let manualRate = null; // 若自動查詢匯率失敗，改用手動輸入
 
   openModal("新增消費", `
     <div class="form-row"><label>項目名稱</label><input type="text" id="exp-title" placeholder="例如：午餐"></div>
@@ -1803,12 +1921,7 @@ function renderAddExpenseModal() {
         </div>
       ` : `<input type="hidden" id="exp-currency" value="TWD">`}
     </div>
-    <div id="manual-rate-row" class="hidden">
-      <div class="form-row">
-        <label>查不到當日匯率，請手動輸入：1 <span id="manual-rate-currency"></span> = 多少台幣？</label>
-        <input type="number" id="exp-manual-rate" min="0" step="0.0001" placeholder="例如：0.21">
-      </div>
-    </div>
+    ${multiCurrency ? `<p style="font-size:12px;color:var(--text-muted);margin-top:-6px;">選外幣的話，不用擔心匯率——先記下來，結算時會統一換算成台幣。</p>` : ""}
     <div class="form-row">
       <label>由誰先付款</label>
       <select id="exp-payer">
@@ -1843,15 +1956,6 @@ function renderAddExpenseModal() {
     });
   });
 
-  // 切換幣別時，把手動匯率欄位收起來（幣別變了，之前查到的匯率就不算數了）
-  const currencySelect = document.getElementById("exp-currency");
-  if (currencySelect.tagName === "SELECT") {
-    currencySelect.addEventListener("change", () => {
-      document.getElementById("manual-rate-row").classList.add("hidden");
-      manualRate = null;
-    });
-  }
-
   document.getElementById("exp-cancel").onclick = closeModal;
   document.getElementById("exp-confirm").onclick = async () => {
     const title = document.getElementById("exp-title").value.trim();
@@ -1865,34 +1969,13 @@ function renderAddExpenseModal() {
     if (!splitWith.length) return toast("請至少選擇一位分攤者");
 
     const amountCents = Math.round(amount * 100);
-    let rateToTWD = 1;
-
-    if (currency !== "TWD") {
-      const manualInput = document.getElementById("exp-manual-rate");
-      const manualVal = manualInput ? parseFloat(manualInput.value) : NaN;
-      if (!document.getElementById("manual-rate-row").classList.contains("hidden") && manualVal > 0) {
-        rateToTWD = manualVal;
-      } else {
-        const btn = document.getElementById("exp-confirm");
-        btn.disabled = true;
-        btn.textContent = "查詢匯率中...";
-        const rate = await fetchExchangeRate(date, currency);
-        btn.disabled = false;
-        btn.textContent = "新增";
-        if (rate) {
-          rateToTWD = rate;
-        } else {
-          document.getElementById("manual-rate-currency").textContent = currency;
-          document.getElementById("manual-rate-row").classList.remove("hidden");
-          toast(`查不到 ${date} 的 ${currency} 匯率，請手動輸入後再按一次「新增」`);
-          return;
-        }
-      }
-    }
-
-    const amountTWDCents = Math.round(amountCents * rateToTWD);
     closeModal();
-    await addExpense({ title, amountCents, currency, rateToTWD, amountTWDCents, payerId, splitWith, date, note });
+    await addExpense({ title, amountCents, currency, payerId, splitWith, date, note });
+
+    // 如果是這趟行程第一次用到這個幣別，順手先查一次匯率（失敗也沒關係，結算頁隨時可以再查／手動輸入）
+    if (currency !== "TWD" && !tripFxRates()[currency]) {
+      refreshFxRate(currency);
+    }
   };
 }
 
