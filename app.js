@@ -654,6 +654,11 @@ async function addExpense({ title, amountCents, currency, payerId, splitWith, da
     createdAt: serverTimestamp(),
   });
 }
+async function updateExpense(expenseId, { title, amountCents, currency, payerId, splitWith, date, note }) {
+  await updateDoc(doc(db, "trips", state.tripId, "expenses", expenseId), {
+    title, amountCents, currency, payerId, splitWith, date, note: note || "",
+  });
+}
 async function deleteExpense(expenseId) {
   await deleteDoc(doc(db, "trips", state.tripId, "expenses", expenseId));
 }
@@ -1760,15 +1765,18 @@ function renderExpensesPage() {
           const info = fxRates[c];
           return `<div class="fx-status-row">
             <span>1 ${escapeHtml(c)} ≈</span>
-            <span>${info ? `${info.rate.toFixed(4)} TWD${info.manual ? "（手動輸入）" : ""}　<span class="fx-updated">${escapeHtml(info.updatedAt)} 更新</span>` : `<span class="fx-missing">尚未取得</span>`}</span>
+            <span>
+              ${info ? `${info.rate.toFixed(4)} TWD${info.manual ? "（手動）" : "（網路）"}　<span class="fx-updated">${escapeHtml(info.updatedAt)}</span>` : `<span class="fx-missing">尚未取得</span>`}
+              <button class="secondary-btn small-btn fx-set-btn" data-currency="${escapeHtml(c)}" style="margin-left:8px;">設定</button>
+            </span>
           </div>`;
         }).join("")}
-        <button class="secondary-btn small-btn" id="refresh-fx-btn" style="margin-top:8px;">🔄 查詢／更新匯率</button>
+        <button class="secondary-btn small-btn" id="refresh-fx-btn" style="margin-top:8px;">🔄 一次查詢全部（網路）</button>
       </div>
     ` : ""}
 
     ${missingCurrencies.length ? `
-      <div class="readonly-banner">⚠️ ${missingCurrencies.map(escapeHtml).join("、")} 還沒有匯率資料，下面的結算金額暫時還沒把這些幣別的消費算進去。按上面「🔄 查詢／更新匯率」試試，或用同一顆按鈕手動輸入。</div>
+      <div class="readonly-banner">⚠️ ${missingCurrencies.map(escapeHtml).join("、")} 還沒有匯率資料，下面的結算金額暫時還沒把這些幣別的消費算進去。可以按上面「設定」用網路查詢或手動輸入。</div>
     ` : ""}
 
     <div class="section-title">結算總覽</div>
@@ -1781,17 +1789,7 @@ function renderExpensesPage() {
           </span>
         </div>
       `).join("")}
-      ${transactions.length ? `
-        <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border);">
-          <div style="font-weight:600;font-size:13px;margin-bottom:6px;color:var(--text-muted);">建議轉帳方式（已自動精簡筆數）</div>
-          ${transactions.map((t) => `
-            <div class="balance-row">
-              <span>${escapeHtml(memberName(t.from))} <span class="settle-arrow">→</span> ${escapeHtml(memberName(t.to))}</span>
-              <span style="font-weight:700;">NT$${fmtMoney(t.amountCents)}</span>
-            </div>
-          `).join("")}
-        </div>
-      ` : `<div class="empty-hint">目前帳務已結清 🎉</div>`}
+      <button class="primary-btn full-width" id="open-settlement-btn" style="margin-top:12px;">🧮 結算（查看建議轉帳方式）</button>
     </div>
 
     <div class="section-title">消費明細</div>
@@ -1831,7 +1829,8 @@ function renderExpensesPage() {
                   ${escapeHtml(memberName(e.payerId))} 先付款，由 ${e.splitWith.map(memberName).map(escapeHtml).join("、")} 分攤
                   ${e.note ? ` · ${escapeHtml(e.note)}` : ""}
                 </div>
-                <div style="margin-top:6px;">
+                <div style="margin-top:6px;display:flex;gap:6px;">
+                  <span class="secondary-btn small-btn edit-expense-btn" data-id="${e.id}">編輯</span>
                   <span class="danger-btn small-btn del-expense-btn" data-id="${e.id}">刪除</span>
                 </div>
               </div>
@@ -1845,9 +1844,19 @@ function renderExpensesPage() {
 
   document.getElementById("tab-itinerary").onclick = () => navigate(`#/trip/${state.tripId}${state.currentDayId ? "/day/" + state.currentDayId : ""}`);
   document.getElementById("tab-expenses").onclick = () => {};
-  document.getElementById("add-expense-btn").addEventListener("click", renderAddExpenseModal);
+  document.getElementById("add-expense-btn").addEventListener("click", () => renderExpenseFormModal(null));
+  document.getElementById("open-settlement-btn").addEventListener("click", () => renderSettlementModal(transactions));
   const refreshBtn = document.getElementById("refresh-fx-btn");
   if (refreshBtn) refreshBtn.addEventListener("click", () => handleRefreshRates(usedCurrencies));
+  root.querySelectorAll(".fx-set-btn").forEach((btn) => {
+    btn.addEventListener("click", () => renderFxRateSettingModal(btn.dataset.currency));
+  });
+  root.querySelectorAll(".edit-expense-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const expense = state.expenses.find((e) => e.id === btn.dataset.id);
+      if (expense) renderExpenseFormModal(expense);
+    });
+  });
   root.querySelectorAll(".del-expense-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       openConfirm("確定要刪除這筆消費紀錄嗎？", async () => {
@@ -1855,6 +1864,63 @@ function renderExpensesPage() {
       });
     });
   });
+}
+
+function renderSettlementModal(transactions) {
+  openModal("結算：建議轉帳方式", `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">已自動精簡成最少的轉帳筆數。</p>
+    ${transactions.length ? transactions.map((t) => `
+      <div class="balance-row">
+        <span>${escapeHtml(memberName(t.from))} <span class="settle-arrow">→</span> ${escapeHtml(memberName(t.to))}</span>
+        <span style="font-weight:700;">NT$${fmtMoney(t.amountCents)}</span>
+      </div>
+    `).join("") : `<div class="empty-hint">目前帳務已結清 🎉</div>`}
+    <div class="form-actions">
+      <button class="primary-btn" id="settlement-close-btn">關閉</button>
+    </div>
+  `);
+  document.getElementById("settlement-close-btn").onclick = closeModal;
+}
+
+function renderFxRateSettingModal(currency) {
+  const info = tripFxRates()[currency];
+  openModal(`設定 ${escapeHtml(currency)} 匯率`, `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">
+      目前：${info ? `1 ${escapeHtml(currency)} ≈ ${info.rate.toFixed(4)} TWD（${info.manual ? "手動輸入" : "網路查詢"}，${escapeHtml(info.updatedAt)} 更新）` : "尚未設定"}
+    </p>
+    <button class="secondary-btn full-width" id="fx-auto-btn">🔄 使用網路即時匯率</button>
+    <div style="margin:18px 0;border-top:1px dashed var(--border);"></div>
+    <div class="form-row">
+      <label>或手動輸入：1 ${escapeHtml(currency)} = 多少台幣？</label>
+      <input type="number" min="0" step="0.0001" id="fx-manual-input" placeholder="例如：0.21">
+    </div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="fx-cancel-btn">取消</button>
+      <button class="primary-btn" id="fx-manual-save-btn">儲存手動匯率</button>
+    </div>
+  `);
+  document.getElementById("fx-cancel-btn").onclick = closeModal;
+  document.getElementById("fx-auto-btn").onclick = async () => {
+    const btn = document.getElementById("fx-auto-btn");
+    btn.disabled = true;
+    btn.textContent = "查詢中...";
+    const ok = await refreshFxRate(currency);
+    if (ok) {
+      closeModal();
+      toast("已更新為網路查詢的匯率");
+    } else {
+      btn.disabled = false;
+      btn.textContent = "🔄 使用網路即時匯率";
+      toast("查詢失敗，請改用下方手動輸入");
+    }
+  };
+  document.getElementById("fx-manual-save-btn").onclick = async () => {
+    const val = parseFloat(document.getElementById("fx-manual-input").value);
+    if (!(val > 0)) return toast("請輸入正確的匯率數字");
+    await saveTripFxRate(currency, val, true);
+    closeModal();
+    toast("已儲存手動匯率");
+  };
 }
 
 async function handleRefreshRates(currencies) {
@@ -1898,25 +1964,26 @@ function renderManualFxModal(currencies) {
   };
 }
 
-function renderAddExpenseModal() {
+function renderExpenseFormModal(existing) {
   const members = state.trip.members;
   const my = myMember();
   const currencies = tripCurrencies();
   const multiCurrency = currencies.length > 1;
-  let splitWith = members.map((m) => m.id); // 預設全員分攤
+  const isEdit = !!existing;
+  let splitWith = existing ? [...existing.splitWith] : members.map((m) => m.id); // 預設全員分攤
 
-  openModal("新增消費", `
-    <div class="form-row"><label>項目名稱</label><input type="text" id="exp-title" placeholder="例如：午餐"></div>
+  openModal(isEdit ? "編輯消費" : "新增消費", `
+    <div class="form-row"><label>項目名稱</label><input type="text" id="exp-title" placeholder="例如：午餐" value="${isEdit ? escapeHtml(existing.title) : ""}"></div>
     <div class="form-row" style="display:flex;gap:8px;">
       <div style="flex:1;">
         <label>金額</label>
-        <input type="number" id="exp-amount" min="0" step="1" placeholder="0">
+        <input type="number" id="exp-amount" min="0" step="1" placeholder="0" value="${isEdit ? Math.round(existing.amountCents) / 100 : ""}">
       </div>
       ${multiCurrency ? `
         <div style="width:120px;">
           <label>幣別</label>
           <select id="exp-currency">
-            ${currencies.map((c) => `<option value="${c}" ${c === "TWD" ? "selected" : ""}>${escapeHtml(c)}</option>`).join("")}
+            ${currencies.map((c) => `<option value="${c}" ${(isEdit ? existing.currency : "TWD") === c ? "selected" : ""}>${escapeHtml(c)}</option>`).join("")}
           </select>
         </div>
       ` : `<input type="hidden" id="exp-currency" value="TWD">`}
@@ -1925,20 +1992,21 @@ function renderAddExpenseModal() {
     <div class="form-row">
       <label>由誰先付款</label>
       <select id="exp-payer">
-        ${members.map((m) => `<option value="${m.id}" ${my && m.id === my.id ? "selected" : ""}>${escapeHtml(m.name)}</option>`).join("")}
+        ${members.map((m) => `<option value="${m.id}" ${(isEdit ? existing.payerId === m.id : my && m.id === my.id) ? "selected" : ""}>${escapeHtml(m.name)}</option>`).join("")}
       </select>
     </div>
     <div class="form-row">
       <label>要跟誰分攤（可複選）</label>
       <div class="checkbox-group" id="split-group">
-        ${members.map((m) => `<div class="checkbox-chip checked" data-id="${m.id}">${escapeHtml(m.name)}</div>`).join("")}
+        ${members.map((m) => `<div class="checkbox-chip ${splitWith.includes(m.id) ? "checked" : ""}" data-id="${m.id}">${escapeHtml(m.name)}</div>`).join("")}
       </div>
     </div>
-    <div class="form-row"><label>日期</label><input type="date" id="exp-date" value="${todayStr()}"></div>
-    <div class="form-row"><label>備註（選填）</label><input type="text" id="exp-note"></div>
+    <div class="form-row"><label>日期</label><input type="date" id="exp-date" value="${isEdit ? escapeHtml(existing.date) : todayStr()}"></div>
+    <div class="form-row"><label>備註（選填）</label><input type="text" id="exp-note" value="${isEdit ? escapeHtml(existing.note || "") : ""}"></div>
     <div class="form-actions">
+      ${isEdit ? `<button class="danger-btn" id="exp-delete" style="margin-right:auto;">刪除</button>` : ""}
       <button class="secondary-btn" id="exp-cancel">取消</button>
-      <button class="primary-btn" id="exp-confirm">新增</button>
+      <button class="primary-btn" id="exp-confirm">${isEdit ? "儲存" : "新增"}</button>
     </div>
   `);
 
@@ -1957,6 +2025,14 @@ function renderAddExpenseModal() {
   });
 
   document.getElementById("exp-cancel").onclick = closeModal;
+  if (isEdit) {
+    document.getElementById("exp-delete").onclick = () => {
+      openConfirm("確定要刪除這筆消費紀錄嗎？", async () => {
+        closeModal();
+        await deleteExpense(existing.id);
+      });
+    };
+  }
   document.getElementById("exp-confirm").onclick = async () => {
     const title = document.getElementById("exp-title").value.trim();
     const amount = parseFloat(document.getElementById("exp-amount").value);
@@ -1970,7 +2046,12 @@ function renderAddExpenseModal() {
 
     const amountCents = Math.round(amount * 100);
     closeModal();
-    await addExpense({ title, amountCents, currency, payerId, splitWith, date, note });
+
+    if (isEdit) {
+      await updateExpense(existing.id, { title, amountCents, currency, payerId, splitWith, date, note });
+    } else {
+      await addExpense({ title, amountCents, currency, payerId, splitWith, date, note });
+    }
 
     // 如果是這趟行程第一次用到這個幣別，順手先查一次匯率（失敗也沒關係，結算頁隨時可以再查／手動輸入）
     if (currency !== "TWD" && !tripFxRates()[currency]) {
