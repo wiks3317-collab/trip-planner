@@ -1205,7 +1205,11 @@ function dayIndexLabel(dayId) {
 
 function renderDaySelector(container, day) {
   if (!state.days.length) {
-    container.innerHTML = "";
+    container.innerHTML = canEditItinerary()
+      ? `<button class="day-selector-btn" id="day-selector-add-btn"><span class="day-selector-title">＋ 新增天數</span></button>`
+      : "";
+    const addBtn = document.getElementById("day-selector-add-btn");
+    if (addBtn) addBtn.addEventListener("click", renderAddDayModal);
     return;
   }
   container.innerHTML = `
