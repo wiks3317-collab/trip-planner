@@ -476,6 +476,59 @@ h1, h2, h3 { font-family: var(--font-heading); }
 @media (min-width: 640px) { #modal-box { border-radius: var(--radius-lg); } }
 .modal-title { font-family: var(--font-heading); font-size: 18px; font-weight: 700; margin: 0 0 14px; }
 
+/* ================= 景點詳細面板 ================= */
+#spot-panel-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: rgba(20,25,22,0.42);
+  animation: fadeIn 0.15s ease-out;
+}
+#spot-panel-box {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  top: 6vh;
+  background: var(--card-bg);
+  border-radius: 20px 20px 0 0;
+  display: flex;
+  flex-direction: column;
+  animation: sheetUp 0.2s cubic-bezier(.2,.8,.3,1);
+  max-width: 860px;
+  margin: 0 auto;
+}
+@media (min-width: 640px) {
+  #spot-panel-box { top: 4vh; bottom: 4vh; border-radius: var(--radius-lg); border: 1px solid var(--border); }
+}
+#spot-panel-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: 12px 10px;
+  border-bottom: 1px dashed var(--border);
+}
+#spot-panel-close {
+  font-size: 14px;
+  font-weight: 700;
+  padding: 8px 12px;
+  border-radius: 999px;
+}
+#spot-panel-header-title {
+  font-family: var(--font-heading);
+  font-weight: 700;
+  font-size: 15px;
+  margin-left: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#spot-panel-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 16px 30px;
+}
+
 /* ================= Toast ================= */
 #toast-container {
   position: fixed;
