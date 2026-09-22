@@ -286,6 +286,27 @@ document.getElementById("modal-overlay").addEventListener("click", (e) => {
 });
 
 // ------------------------------------------------------------
+// 景點詳細面板（彈出式，取代整頁跳轉）
+// ------------------------------------------------------------
+function showSpotPanel() {
+  document.getElementById("spot-panel-overlay").classList.remove("hidden");
+}
+function hideSpotPanel() {
+  document.getElementById("spot-panel-overlay").classList.add("hidden");
+  document.getElementById("spot-panel-content").innerHTML = "";
+  clearUnsub("spot");
+  clearUnsub("wishes");
+}
+function closeSpotPanel() {
+  // 沿用路由，這樣網址列、上一頁鍵都會維持正確狀態
+  navigate(`#/trip/${state.tripId}/day/${state.currentDayId}`);
+}
+document.getElementById("spot-panel-close").addEventListener("click", closeSpotPanel);
+document.getElementById("spot-panel-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "spot-panel-overlay") closeSpotPanel();
+});
+
+// ------------------------------------------------------------
 // 路由
 // ------------------------------------------------------------
 function navigate(hash) {
@@ -337,6 +358,7 @@ async function route() {
     state.tripId = null;
     state.trip = null;
     applyTripBackground(null);
+    hideSpotPanel();
     renderWelcome();
     renderTripMenu();
     updateHeader();
@@ -362,16 +384,21 @@ async function route() {
   // 進站時若這個裝置在這個行程還沒選過身份，先強制選擇
   const my = myMember();
   if (!my && !sessionStorage.getItem("tp_skip_pick_" + r.tripId)) {
+    hideSpotPanel();
     renderMemberPicker();
     return;
   }
 
   if (state.tripSection === "expenses") {
+    hideSpotPanel();
     subscribeExpenses();
     renderExpensesPage();
   } else if (r.spotId) {
+    renderTripHome(); // 讓面板底下的當天行程維持在畫面上
+    showSpotPanel();
     subscribeSpot(r.dayId, r.spotId);
   } else {
+    hideSpotPanel();
     renderTripHome();
   }
 }
@@ -1506,17 +1533,15 @@ function renderBlockEditModal(type, existing, onSave) {
 // ------------------------------------------------------------
 function renderSpotPage() {
   if (!state.currentSpot) return;
-  const root = document.getElementById("app-root");
+  const root = document.getElementById("spot-panel-content");
   const day = state.days.find((d) => d.id === state.currentDayId) || { title: "" };
   const spot = state.currentSpot;
   const canEdit = canEditItinerary();
 
+  document.getElementById("spot-panel-header-title").textContent = spot.title;
+
   root.innerHTML = `
-    <div class="breadcrumb">
-      <span id="bc-trip">${escapeHtml(state.trip.name)}</span> ›
-      <span id="bc-day">${escapeHtml(day.title)}</span> ›
-      ${escapeHtml(spot.title)}
-    </div>
+    <div class="breadcrumb">${escapeHtml(day.title)} › ${escapeHtml(spot.title)}</div>
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div>
@@ -1543,9 +1568,6 @@ function renderSpotPage() {
     </div>
   `;
 
-  document.getElementById("bc-trip").addEventListener("click", () => navigate(`#/trip/${state.tripId}`));
-  document.getElementById("bc-day").addEventListener("click", () => navigate(`#/trip/${state.tripId}/day/${day.id}`));
-
   renderContentBlocks(document.getElementById("spot-blocks"), spot.blocks || [], {
     editable: canEdit,
     onChange: (blocks) => updateSpotBlocks(day.id, spot.id, blocks),
@@ -1556,7 +1578,7 @@ function renderSpotPage() {
     document.getElementById("delete-spot-btn").addEventListener("click", () => {
       openConfirm(`確定要刪除「${spot.title}」嗎？`, async () => {
         await deleteSpot(day.id, spot.id);
-        navigate(`#/trip/${state.tripId}/day/${day.id}`);
+        closeSpotPanel();
         toast("已刪除");
       });
     });
