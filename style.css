@@ -394,6 +394,7 @@ h1, h2, h3 { font-family: var(--font-heading); }
 }
 .expense-top { display: flex; justify-content: space-between; font-weight: 700; font-size: 14.5px; }
 .expense-fx { font-size: 12px; color: var(--text-muted); margin-top: 3px; }
+.expense-fx-missing { color: color-mix(in srgb, var(--accent) 65%, black); }
 .expense-meta { font-size: 12px; color: var(--text-muted); margin-top: 5px; }
 .expense-amount { color: var(--primary-dark); }
 .currency-tag {
@@ -407,6 +408,23 @@ h1, h2, h3 { font-family: var(--font-heading); }
   margin-left: 4px;
   vertical-align: middle;
 }
+.fx-status-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  margin-bottom: 12px;
+}
+.fx-status-title { font-size: 13px; font-weight: 700; color: var(--text-muted); margin-bottom: 6px; }
+.fx-status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 13.5px;
+  padding: 5px 0;
+}
+.fx-updated { font-size: 11px; color: var(--text-muted); }
+.fx-missing { color: color-mix(in srgb, var(--accent) 65%, black); font-weight: 700; }
 .balance-row {
   display: flex;
   justify-content: space-between;
