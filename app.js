@@ -623,14 +623,18 @@ function subscribeSpot(dayId, spotId) {
   });
 }
 
-async function addWish(dayId, spotId, text) {
+async function addWish(dayId, spotId, text, imageUrl) {
   const m = myMember();
   await addDoc(collection(db, "trips", state.tripId, "days", dayId, "spots", spotId, "wishes"), {
-    text,
+    text: text || "",
+    imageUrl: imageUrl || null,
     authorId: m ? m.id : null,
     authorName: m ? m.name : "匿名旅伴",
     createdAt: serverTimestamp(),
   });
+}
+async function updateWish(dayId, spotId, wishId, data) {
+  await updateDoc(doc(db, "trips", state.tripId, "days", dayId, "spots", spotId, "wishes", wishId), data);
 }
 async function deleteWish(dayId, spotId, wishId) {
   await deleteDoc(doc(db, "trips", state.tripId, "days", dayId, "spots", spotId, "wishes", wishId));
@@ -1586,10 +1590,14 @@ function renderSpotPage() {
 
     <div class="section-title">💭 許願池</div>
     <div class="card">
-      <p style="color:var(--text-muted);font-size:13px;margin-top:0;">大家都可以在這裡留言，寫下想去的地方、想吃的東西（不限權限）</p>
-      <div class="form-row" style="display:flex;gap:8px;">
-        <input type="text" id="wish-input" placeholder="想去...想吃..." style="flex:1;">
-        <button class="primary-btn" id="wish-submit">送出</button>
+      <p style="color:var(--text-muted);font-size:13px;margin-top:0;">大家都可以在這裡留言，寫下想去的地方、想吃的東西，也可以貼圖片連結分享照片（不限權限）</p>
+      <div class="form-row" style="display:flex;flex-direction:column;gap:6px;">
+        <div style="display:flex;gap:8px;">
+          <input type="text" id="wish-input" placeholder="想去...想吃..." style="flex:1;">
+          <button class="secondary-btn small-btn" id="wish-img-toggle" title="附上圖片連結">🖼️</button>
+          <button class="primary-btn" id="wish-submit">送出</button>
+        </div>
+        <input type="text" id="wish-image-input" placeholder="圖片網址（選填，貼上圖片連結）" style="display:none;">
       </div>
       <div id="wish-list"></div>
     </div>
@@ -1619,28 +1627,72 @@ function renderSpotPage() {
     wishListEl.innerHTML = state.wishes.map((w) => `
       <div class="wish-item" data-wishid="${w.id}">
         <div class="wish-author">${escapeHtml(w.authorName)}</div>
-        <div class="wish-text">${escapeHtml(w.text)}</div>
+        ${w.text ? `<div class="wish-text">${escapeHtml(w.text)}</div>` : ""}
+        ${w.imageUrl ? `<div class="wish-image"><img src="${escapeHtml(w.imageUrl)}" alt="" loading="lazy"></div>` : ""}
         <div class="wish-time">${fmtDateTime(w.createdAt)}
-          ${(my && (w.authorId === my.id || isOwner())) ? `<span class="del-wish-btn" data-wishid="${w.id}" style="color:var(--danger);cursor:pointer;margin-left:8px;">刪除</span>` : ""}
+          ${(my && (w.authorId === my.id || isOwner())) ? `<span class="edit-wish-btn" data-wishid="${w.id}" style="color:var(--accent);cursor:pointer;margin-left:8px;">編輯</span><span class="del-wish-btn" data-wishid="${w.id}" style="color:var(--danger);cursor:pointer;margin-left:8px;">刪除</span>` : ""}
         </div>
       </div>
     `).join("");
     wishListEl.querySelectorAll(".del-wish-btn").forEach((btn) => {
-      btn.addEventListener("click", () => deleteWish(day.id, spot.id, btn.dataset.wishid));
+      btn.addEventListener("click", () => {
+        openConfirm("確定要刪除這則留言嗎？", async () => {
+          await deleteWish(day.id, spot.id, btn.dataset.wishid);
+        });
+      });
+    });
+    wishListEl.querySelectorAll(".edit-wish-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const wish = state.wishes.find((w) => w.id === btn.dataset.wishid);
+        if (wish) renderEditWishModal(day.id, spot.id, wish);
+      });
     });
   }
 
+  document.getElementById("wish-img-toggle").addEventListener("click", () => {
+    const el = document.getElementById("wish-image-input");
+    const showing = el.style.display !== "none";
+    el.style.display = showing ? "none" : "block";
+    if (!showing) el.focus();
+  });
+
   const submitWish = async () => {
     const input = document.getElementById("wish-input");
+    const imgInput = document.getElementById("wish-image-input");
     const text = input.value.trim();
-    if (!text) return;
+    const imageUrl = imgInput.value.trim();
+    if (!text && !imageUrl) return;
     input.value = "";
-    await addWish(day.id, spot.id, text);
+    imgInput.value = "";
+    imgInput.style.display = "none";
+    await addWish(day.id, spot.id, text, imageUrl);
   };
   document.getElementById("wish-submit").addEventListener("click", submitWish);
   document.getElementById("wish-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") submitWish();
   });
+  document.getElementById("wish-image-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submitWish();
+  });
+}
+
+function renderEditWishModal(dayId, spotId, wish) {
+  openModal("編輯留言", `
+    <div class="form-row"><label>內容</label><textarea id="wish-edit-text" rows="3" placeholder="想去...想吃...">${escapeHtml(wish.text || "")}</textarea></div>
+    <div class="form-row"><label>圖片網址（選填）</label><input type="text" id="wish-edit-image" value="${escapeHtml(wish.imageUrl || "")}" placeholder="https://..."></div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="wish-edit-cancel">取消</button>
+      <button class="primary-btn" id="wish-edit-save">儲存</button>
+    </div>
+  `);
+  document.getElementById("wish-edit-cancel").onclick = closeModal;
+  document.getElementById("wish-edit-save").onclick = async () => {
+    const text = document.getElementById("wish-edit-text").value.trim();
+    const imageUrl = document.getElementById("wish-edit-image").value.trim();
+    if (!text && !imageUrl) return toast("內容和圖片網址不能都空白");
+    closeModal();
+    await updateWish(dayId, spotId, wish.id, { text, imageUrl: imageUrl || null });
+  };
 }
 
 function renderEditSpotMetaModal(dayId, spot) {
