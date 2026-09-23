@@ -84,7 +84,9 @@ service cloud.firestore {
           && request.resource.data.status == 'pending'
           && canReadTrip(tripId);
         allow get: if signedIn()
-          && (isOwner(tripId) || resource.data.requestedUid == request.auth.uid);
+          && (isOwner(tripId)
+            || requestId == request.auth.uid
+            || resource.data.requestedUid == request.auth.uid);
         allow list: if isOwner(tripId);
         allow update: if isOwner(tripId)
           || (signedIn()
