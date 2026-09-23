@@ -517,16 +517,20 @@ async function updateTripMembers(members) {
 async function createEditAccessRequest() {
   const uid = currentUid();
   if (!uid || !state.tripId || canEditItinerary()) return;
-  const existing = await getDocs(collection(db, "trips", state.tripId, "accessRequests"));
-  const alreadyPending = existing.docs.some((d) => {
-    const data = d.data();
-    return data.requestedUid === uid && data.status === "pending";
-  });
-  if (alreadyPending) {
-    toast("你已經送出過編輯權限申請，請等待統籌人處理");
-    return;
+
+  // 使用申請者 UID 作為文件 ID，避免訪客送出申請前必須查詢整個申請集合。
+  // 同一個 UID 在同一個行程中只會有一筆申請資料。
+  const requestRef = doc(db, "trips", state.tripId, "accessRequests", uid);
+  const existing = await getDoc(requestRef);
+  if (existing.exists()) {
+    const data = existing.data();
+    if (data.status === "pending") {
+      toast("你已經送出過編輯權限申請，請等待統籌人處理");
+      return;
+    }
   }
-  await addDoc(collection(db, "trips", state.tripId, "accessRequests"), {
+
+  await setDoc(requestRef, {
     requestedUid: uid,
     status: "pending",
     createdAt: serverTimestamp(),
