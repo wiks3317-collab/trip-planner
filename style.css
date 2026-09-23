@@ -388,10 +388,17 @@ h1, h2, h3 { font-family: var(--font-heading); }
   margin-bottom: 8px;
 }
 .wish-author { font-size: 12px; font-weight: 700; color: color-mix(in srgb, var(--accent) 70%, black); }
+.wish-image {
+  display: block;
+  max-width: 100%;
+  border-radius: var(--radius-sm);
+  margin-top: 6px;
+}
 .wish-text { font-size: 14px; margin-top: 3px; white-space: pre-wrap; }
 .wish-image { margin-top: 8px; }
 .wish-image img { max-width: 100%; max-height: 320px; object-fit: cover; border-radius: var(--radius-sm); display: block; }
 .wish-time { font-size: 11px; color: var(--text-muted); margin-top: 5px; }
+.wish-time span { cursor: pointer; }									
 
 /* ================= Expenses ================= */
 .expense-item {
@@ -502,6 +509,23 @@ h1, h2, h3 { font-family: var(--font-heading); }
 @keyframes sheetUp { from { transform: translateY(24px); opacity: 0.4; } to { transform: translateY(0); opacity: 1; } }
 @media (min-width: 640px) { #modal-box { border-radius: var(--radius-lg); } }
 .modal-title { font-family: var(--font-heading); font-size: 18px; font-weight: 700; margin: 0 0 14px; }
+
+.short-code-box {
+  text-align: center;
+  background: color-mix(in srgb, var(--primary) 8%, white);
+  border: 1px dashed var(--primary);
+  border-radius: var(--radius-sm);
+  padding: 14px;
+  margin-bottom: 14px;
+}
+.short-code-label { font-size: 12px; color: var(--text-muted); font-weight: 700; margin-bottom: 4px; }
+.short-code-value {
+  font-family: var(--font-heading);
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: 4px;
+  color: var(--primary-dark);
+}
 
 /* ================= 景點詳細面板 ================= */
 #spot-panel-overlay {
