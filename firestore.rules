@@ -79,11 +79,18 @@ service cloud.firestore {
 
       match /accessRequests/{requestId} {
         allow create: if signedIn()
+          && requestId == request.auth.uid
           && request.resource.data.requestedUid == request.auth.uid
-          && request.resource.data.status == 'pending';
-        allow get, list: if signedIn()
+          && request.resource.data.status == 'pending'
+          && canReadTrip(tripId);
+        allow get: if signedIn()
           && (isOwner(tripId) || resource.data.requestedUid == request.auth.uid);
-        allow update: if isOwner(tripId);
+        allow list: if isOwner(tripId);
+        allow update: if isOwner(tripId)
+          || (signedIn()
+            && resource.data.requestedUid == request.auth.uid
+            && request.resource.data.requestedUid == resource.data.requestedUid
+            && request.resource.data.status == resource.data.status);
         allow delete: if false;
       }
     }
