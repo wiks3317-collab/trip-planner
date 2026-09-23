@@ -667,3 +667,8 @@ h1, h2, h3 { font-family: var(--font-heading); }
   font-size: 13px;
 }
 .size-option-btn.active { border-color: var(--primary); color: var(--primary-dark); background: color-mix(in srgb, var(--primary) 8%, white); }
+
+/* 拖曳排序 */
+.drag-sort-item { cursor: grab; }
+.drag-sort-item.dragging { opacity: .45; }
+.drag-sort-item.drag-over { outline: 2px dashed var(--accent); outline-offset: 3px; }
