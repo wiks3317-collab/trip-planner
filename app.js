@@ -514,6 +514,53 @@ async function updateTripMembers(members) {
   await updateDoc(doc(db, "trips", state.tripId), { members, access });
 }
 
+async function createEditAccessRequest() {
+  const uid = currentUid();
+  if (!uid || !state.tripId || canEditItinerary()) return;
+  const existing = await getDocs(collection(db, "trips", state.tripId, "accessRequests"));
+  const alreadyPending = existing.docs.some((d) => {
+    const data = d.data();
+    return data.requestedUid === uid && data.status === "pending";
+  });
+  if (alreadyPending) {
+    toast("你已經送出過編輯權限申請，請等待統籌人處理");
+    return;
+  }
+  await addDoc(collection(db, "trips", state.tripId, "accessRequests"), {
+    requestedUid: uid,
+    status: "pending",
+    createdAt: serverTimestamp(),
+  });
+  toast("已送出編輯權限申請，請通知統籌人審核");
+}
+
+async function loadAccessRequests() {
+  const snap = await getDocs(collection(db, "trips", state.tripId, "accessRequests"));
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
+async function approveAccessRequest(requestId, requestedUid, memberId) {
+  const members = (state.trip.members || []).map((m) => ({ ...m }));
+  const target = members.find((m) => m.id === memberId);
+  if (!target) throw new Error("找不到要綁定的成員");
+  if (target.permission === "owner") throw new Error("不能把申請者綁定到統籌人欄位");
+  target.uid = requestedUid;
+  target.permission = "editor";
+  await updateTripMembers(members);
+  await updateDoc(doc(db, "trips", state.tripId, "accessRequests", requestId), {
+    status: "approved",
+    approvedMemberId: memberId,
+    approvedAt: serverTimestamp(),
+  });
+}
+
+async function rejectAccessRequest(requestId) {
+  await updateDoc(doc(db, "trips", state.tripId, "accessRequests", requestId), {
+    status: "rejected",
+    rejectedAt: serverTimestamp(),
+  });
+}
+
 function isLegacyTrip() {
   return !state.trip?.authModelVersion || !state.trip?.ownerUid || !state.trip?.access;
 }
@@ -1445,7 +1492,7 @@ function renderTripHome() {
       <button class="tab-btn ${state.tripSection === "itinerary" ? "active" : ""}" id="tab-itinerary">📅 行程</button>
       <button class="tab-btn ${state.tripSection === "expenses" ? "active" : ""}" id="tab-expenses">💰 記帳與分帳</button>
     </div>
-    ${isLegacyTrip() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>這是舊版行程資料，目前尚未綁定新的身份權限。</span><button class="secondary-btn small-btn" id="claim-legacy-trip-btn">我是原統籌人，進行資料銜接</button></div>` : (!canEditItinerary() ? `<div class="readonly-banner">你目前是唯讀身份，可以瀏覽行程、許願池留言與記帳，但無法新增或編輯行程內容。</div>` : "")}
+    ${isLegacyTrip() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>這是舊版行程資料，目前尚未綁定新的身份權限。</span><button class="secondary-btn small-btn" id="claim-legacy-trip-btn">我是原統籌人，進行資料銜接</button></div>` : (!canEditItinerary() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>你目前是唯讀身份，可以瀏覽行程、許願池留言與記帳，但無法新增或編輯行程內容。</span><button class="secondary-btn small-btn" id="request-edit-access-btn">申請編輯權限</button></div>` : "")}
     <div id="day-selector-wrap"></div>
     <div id="day-content"></div>
   `;
@@ -1460,6 +1507,19 @@ function renderTripHome() {
       } catch (err) {
         console.error(err);
         toast("資料銜接失敗，請先確認 Firebase 規則仍允許舊資料遷移");
+      }
+    };
+  }
+  const requestBtn = document.getElementById("request-edit-access-btn");
+  if (requestBtn) {
+    requestBtn.onclick = async () => {
+      try {
+        requestBtn.disabled = true;
+        await createEditAccessRequest();
+      } catch (err) {
+        console.error(err);
+        toast("申請送出失敗，請確認 Firebase 規則已更新");
+        requestBtn.disabled = false;
       }
     };
   }
@@ -2636,6 +2696,10 @@ function renderManageMembersModal() {
   openModal("管理成員與權限", `
     <div id="manage-members-wrap"></div>
     <button class="secondary-btn small-btn" id="manage-add-member-btn" style="margin-top:4px;">＋ 新增成員</button>
+    <div style="border-top:1px dashed var(--border);margin-top:16px;padding-top:12px;">
+      <h4 style="margin:0 0 8px;">編輯權限申請</h4>
+      <div id="access-requests-wrap"><p style="color:var(--text-muted);font-size:13px;">載入中...</p></div>
+    </div>
     <p style="font-size:12px;color:var(--text-muted);margin-top:12px;">
       提醒：移除成員不會刪除他過去留下的許願池留言或消費紀錄，但他將無法再用原本的身份登入。
     </p>
@@ -2645,6 +2709,61 @@ function renderManageMembersModal() {
     </div>
   `);
   renderRows();
+  (async () => {
+    const wrap = document.getElementById("access-requests-wrap");
+    try {
+      const requests = (await loadAccessRequests()).filter((r) => r.status === "pending");
+      if (!requests.length) {
+        wrap.innerHTML = `<p style="color:var(--text-muted);font-size:13px;">目前沒有待審核申請。</p>`;
+        return;
+      }
+      const candidates = members.filter((m) => m.permission !== "owner" && !m.uid);
+      wrap.innerHTML = requests.map((r) => `
+        <div class="card" style="padding:10px;margin-bottom:8px;">
+          <div style="font-size:12px;word-break:break-all;">UID：${escapeHtml(r.requestedUid)}</div>
+          <div style="display:flex;gap:6px;align-items:center;margin-top:8px;">
+            <select data-request-member="${r.id}" style="flex:1;padding:8px;border:1px solid var(--border);border-radius:8px;">
+              <option value="">選擇要綁定的成員</option>
+              ${candidates.map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)}（${permLabel(m.permission)}）</option>`).join("")}
+            </select>
+            <button class="primary-btn small-btn" data-approve-request="${r.id}">核准</button>
+            <button class="secondary-btn small-btn" data-reject-request="${r.id}">拒絕</button>
+          </div>
+        </div>`).join("");
+      wrap.querySelectorAll("[data-approve-request]").forEach((btn) => {
+        btn.onclick = async () => {
+          const req = requests.find((r) => r.id === btn.dataset.approveRequest);
+          const select = wrap.querySelector(`[data-request-member="${req.id}"]`);
+          if (!select.value) return toast("請先選擇要綁定的成員");
+          try {
+            btn.disabled = true;
+            await approveAccessRequest(req.id, req.requestedUid, select.value);
+            toast("已核准編輯權限，請通知對方重新整理");
+            closeModal();
+          } catch (err) {
+            console.error(err);
+            toast("核准失敗，請確認規則及成員資料");
+            btn.disabled = false;
+          }
+        };
+      });
+      wrap.querySelectorAll("[data-reject-request]").forEach((btn) => {
+        btn.onclick = async () => {
+          try {
+            await rejectAccessRequest(btn.dataset.rejectRequest);
+            toast("已拒絕申請");
+            closeModal();
+          } catch (err) {
+            console.error(err);
+            toast("拒絕申請失敗");
+          }
+        };
+      });
+    } catch (err) {
+      console.error(err);
+      wrap.innerHTML = `<p style="color:var(--danger);font-size:13px;">申請資料載入失敗，請確認 Firestore Rules。</p>`;
+    }
+  })();
   document.getElementById("manage-add-member-btn").addEventListener("click", () => {
     members.push({ id: newLocalId(), name: "", permission: "editor" });
     renderRows();
