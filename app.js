@@ -593,12 +593,16 @@ function subscribeSpots(dayId) {
   });
 }
 
-async function createSpot(dayId, title, time) {
+async function createSpot(dayId, title, time, address) {
   const order = state.spots.length;
   const ref = await addDoc(collection(db, "trips", state.tripId, "days", dayId, "spots"), {
-    title, time: time || "", order, blocks: [], createdAt: serverTimestamp(),
+    title, time: time || "", address: address || "", order, blocks: [], createdAt: serverTimestamp(),
   });
   return ref.id;
+}
+// 產生 Google 地圖搜尋連結（優先用使用者填的地址，沒有就用名稱去搜）
+function googleMapsUrl(query) {
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
 }
 async function updateSpotMeta(dayId, spotId, data) {
   await updateDoc(doc(db, "trips", state.tripId, "days", dayId, "spots", spotId), data);
@@ -1544,6 +1548,7 @@ function renderAddSpotModal(dayId) {
   openModal("新增時段／景點", `
     <div class="form-row"><label>景點／活動名稱</label><input type="text" id="spot-title" placeholder="例如：淺草寺"></div>
     <div class="form-row"><label>時間（選填）</label><input type="time" id="spot-time"></div>
+    <div class="form-row"><label>地址／地點（選填，用於 Google 地圖）</label><input type="text" id="spot-address" placeholder="不填的話會直接用名稱去搜尋地圖"></div>
     <div class="form-actions">
       <button class="secondary-btn" id="spot-cancel">取消</button>
       <button class="primary-btn" id="spot-confirm">新增</button>
@@ -1553,9 +1558,10 @@ function renderAddSpotModal(dayId) {
   document.getElementById("spot-confirm").onclick = async () => {
     const title = document.getElementById("spot-title").value.trim();
     const time = document.getElementById("spot-time").value;
+    const address = document.getElementById("spot-address").value.trim();
     if (!title) return toast("請輸入名稱");
     closeModal();
-    await createSpot(dayId, title, time);
+    await createSpot(dayId, title, time, address);
   };
 }
 
@@ -1744,6 +1750,7 @@ function renderSpotPage() {
         <div>
           <div style="font-weight:700;font-size:17px;">${escapeHtml(spot.title)}</div>
           ${spot.time ? `<div style="color:var(--text-muted);font-size:13px;margin-top:2px;">🕒 ${escapeHtml(spot.time)}</div>` : ""}
+          <a href="${googleMapsUrl(spot.address || spot.title)}" target="_blank" rel="noopener" class="secondary-btn small-btn" style="display:inline-flex;align-items:center;gap:4px;margin-top:8px;text-decoration:none;">📍 在 Google 地圖開啟</a>
         </div>
         ${canEdit ? `
           <div style="display:flex;gap:6px;">
@@ -1796,6 +1803,7 @@ function renderSpotPage() {
         ${w.text ? `<div class="wish-text">${escapeHtml(w.text)}</div>` : ""}
         ${w.imageUrl ? `<div class="wish-image"><img src="${escapeHtml(w.imageUrl)}" alt="" loading="lazy"></div>` : ""}
         <div class="wish-time">${fmtDateTime(w.createdAt)}
+          ${w.text ? `<a href="${googleMapsUrl(w.text)}" target="_blank" rel="noopener" style="color:var(--accent);margin-left:8px;text-decoration:none;">📍地圖</a>` : ""}
           ${(my && (w.authorId === my.id || isOwner())) ? `<span class="edit-wish-btn" data-wishid="${w.id}" style="color:var(--accent);cursor:pointer;margin-left:8px;">編輯</span><span class="del-wish-btn" data-wishid="${w.id}" style="color:var(--danger);cursor:pointer;margin-left:8px;">刪除</span>` : ""}
         </div>
       </div>
@@ -1865,6 +1873,7 @@ function renderEditSpotMetaModal(dayId, spot) {
   openModal("編輯景點資訊", `
     <div class="form-row"><label>名稱</label><input type="text" id="spot-title" value="${escapeHtml(spot.title)}"></div>
     <div class="form-row"><label>時間</label><input type="time" id="spot-time" value="${escapeHtml(spot.time || "")}"></div>
+    <div class="form-row"><label>地址／地點（選填，用於 Google 地圖）</label><input type="text" id="spot-address" value="${escapeHtml(spot.address || "")}" placeholder="不填的話會直接用名稱去搜尋地圖"></div>
     <div class="form-actions">
       <button class="secondary-btn" id="spot-cancel">取消</button>
       <button class="primary-btn" id="spot-confirm">儲存</button>
@@ -1874,8 +1883,9 @@ function renderEditSpotMetaModal(dayId, spot) {
   document.getElementById("spot-confirm").onclick = async () => {
     const title = document.getElementById("spot-title").value.trim();
     const time = document.getElementById("spot-time").value;
+    const address = document.getElementById("spot-address").value.trim();
     if (!title) return toast("請輸入名稱");
-    await updateSpotMeta(dayId, spot.id, { title, time });
+    await updateSpotMeta(dayId, spot.id, { title, time, address });
     closeModal();
   };
 }
