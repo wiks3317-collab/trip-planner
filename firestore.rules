@@ -29,12 +29,11 @@ service cloud.firestore {
       return isOwner(tripId) || role(tripId) == 'owner' || role(tripId) == 'editor';
     }
 
+    // 行程資料目前採「知道行程 ID／取得分享連結即可讀取」的模式。
+    // 讀取權限與編輯權限分離：未綁定 UID 的訪客只能讀取，不能修改。
+    // 使用者已接受行程內容不必作為私人資料保護；後續仍可再加入邀請碼或更細緻的讀取控管。
     function canReadTrip(tripId) {
-      return isLegacyTrip(tripId)
-        || isOwner(tripId)
-        || role(tripId) == 'owner'
-        || role(tripId) == 'editor'
-        || role(tripId) == 'viewer';
+      return signedIn();
     }
 
     match /trips/{tripId} {
@@ -82,7 +81,14 @@ service cloud.firestore {
     match /shortlinks/{code} {
       allow get: if signedIn();
       allow list: if false;
-      allow create: if signedIn();
+      // 行程分享代碼只能由該行程統籌人建立；同步清單代碼則由已登入使用者建立。
+      allow create: if signedIn()
+        && (
+          (request.resource.data.type == 'trip'
+            && request.resource.data.tripId is string
+            && isOwner(request.resource.data.tripId))
+          || request.resource.data.type == 'sync'
+        );
       allow update, delete: if false;
     }
   }
