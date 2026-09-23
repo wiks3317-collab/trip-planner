@@ -23,17 +23,22 @@ function escapeHtml(str) {
 }
 
 // 產生 Google 地圖連結：
-// - 如果 value 本身就是網址（例如手動貼的 Google 地圖連結），直接使用
-// - 否則把 value（或找不到 value 時的 fallbackText）當作關鍵字，組成地圖搜尋連結
-function mapLinkFor(value, fallbackText) {
-  const raw = (value || "").trim();
-  if (raw) {
-    if (/^https?:\/\//i.test(raw)) return raw;
-    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(raw)}`;
-  }
-  const fb = (fallbackText || "").trim();
-  if (fb) return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(fb)}`;
-  return null;
+// - normalizeMapLink：把使用者貼的「Google地圖連結」欄位轉成可用的網址（沒帶 https:// 也會自動補上）
+// - mapSearchLink：把「地址／地點」關鍵字組成 Google 地圖搜尋連結
+// - resolveMapHref：連結優先，沒有連結才退回用地址／地點搜尋，再沒有才用最後的 fallback 文字搜尋
+function normalizeMapLink(url) {
+  const raw = (url || "").trim();
+  if (!raw) return null;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  return `https://${raw}`;
+}
+function mapSearchLink(query) {
+  const raw = (query || "").trim();
+  if (!raw) return null;
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(raw)}`;
+}
+function resolveMapHref(linkValue, addressValue, fallbackText) {
+  return normalizeMapLink(linkValue) || mapSearchLink(addressValue) || mapSearchLink(fallbackText);
 }
 
 function newLocalId() {
@@ -658,12 +663,13 @@ function subscribeSpot(dayId, spotId) {
   });
 }
 
-async function addWish(dayId, spotId, text, imageUrl, mapUrl) {
+async function addWish(dayId, spotId, text, imageUrl, mapUrl, mapAddress) {
   const m = myMember();
   await addDoc(collection(db, "trips", state.tripId, "days", dayId, "spots", spotId, "wishes"), {
     text: text || "",
     imageUrl: imageUrl || null,
     mapUrl: mapUrl || null,
+    mapAddress: mapAddress || null,
     authorId: m ? m.id : null,
     authorName: m ? m.name : "匿名旅伴",
     createdAt: serverTimestamp(),
@@ -1767,7 +1773,7 @@ function renderSpotPage() {
           </div>` : ""}
       </div>
       ${(() => {
-        const href = mapLinkFor(spot.mapUrl, spot.title);
+        const href = resolveMapHref(spot.mapUrl, null, spot.title);
         return href ? `<a class="secondary-btn small-btn" href="${escapeHtml(href)}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:4px;margin-top:10px;text-decoration:none;">📍 在 Google 地圖上查看</a>` : "";
       })()}
       <div id="spot-blocks" style="margin-top:12px;"></div>
@@ -1780,11 +1786,14 @@ function renderSpotPage() {
         <div style="display:flex;gap:8px;">
           <input type="text" id="wish-input" placeholder="想去...想吃..." style="flex:1;">
           <button class="secondary-btn small-btn" id="wish-img-toggle" title="附上圖片連結">🖼️</button>
-          <button class="secondary-btn small-btn" id="wish-map-toggle" title="附上地點／Google地圖連結">📍</button>
+          <button class="secondary-btn small-btn" id="wish-map-toggle" title="附上地標">📍 地標</button>
           <button class="primary-btn" id="wish-submit">送出</button>
         </div>
         <input type="text" id="wish-image-input" placeholder="圖片網址（選填，貼上圖片連結）" style="display:none;">
-        <input type="text" id="wish-map-input" placeholder="地點名稱或 Google 地圖連結（選填）" style="display:none;">
+        <div id="wish-map-fields" style="display:none;flex-direction:column;gap:6px;">
+          <input type="text" id="wish-map-link-input" placeholder="Google 地圖連結（例如 https://maps.app.goo.gl/3yRm2VmBV6d4LFRN8）">
+          <input type="text" id="wish-map-address-input" placeholder="地址／地點（沒填連結的話，會用這個關鍵字搜尋）">
+        </div>
       </div>
       <div id="wish-list"></div>
     </div>
@@ -1812,7 +1821,7 @@ function renderSpotPage() {
   } else {
     const my = myMember();
     wishListEl.innerHTML = state.wishes.map((w) => {
-      const mapHref = mapLinkFor(w.mapUrl, w.text);
+      const mapHref = resolveMapHref(w.mapUrl, w.mapAddress, null);
       return `
       <div class="wish-item" data-wishid="${w.id}">
         <div class="wish-author">${escapeHtml(w.authorName)}</div>
@@ -1848,26 +1857,29 @@ function renderSpotPage() {
   });
 
   document.getElementById("wish-map-toggle").addEventListener("click", () => {
-    const el = document.getElementById("wish-map-input");
+    const el = document.getElementById("wish-map-fields");
     const showing = el.style.display !== "none";
-    el.style.display = showing ? "none" : "block";
-    if (!showing) el.focus();
+    el.style.display = showing ? "none" : "flex";
+    if (!showing) document.getElementById("wish-map-link-input").focus();
   });
 
   const submitWish = async () => {
     const input = document.getElementById("wish-input");
     const imgInput = document.getElementById("wish-image-input");
-    const mapInput = document.getElementById("wish-map-input");
+    const mapLinkInput = document.getElementById("wish-map-link-input");
+    const mapAddressInput = document.getElementById("wish-map-address-input");
     const text = input.value.trim();
     const imageUrl = imgInput.value.trim();
-    const mapUrl = mapInput.value.trim();
+    const mapUrl = mapLinkInput.value.trim();
+    const mapAddress = mapAddressInput.value.trim();
     if (!text && !imageUrl) return;
     input.value = "";
     imgInput.value = "";
     imgInput.style.display = "none";
-    mapInput.value = "";
-    mapInput.style.display = "none";
-    await addWish(day.id, spot.id, text, imageUrl, mapUrl);
+    mapLinkInput.value = "";
+    mapAddressInput.value = "";
+    document.getElementById("wish-map-fields").style.display = "none";
+    await addWish(day.id, spot.id, text, imageUrl, mapUrl, mapAddress);
   };
   document.getElementById("wish-submit").addEventListener("click", submitWish);
   document.getElementById("wish-input").addEventListener("keydown", (e) => {
@@ -1876,7 +1888,10 @@ function renderSpotPage() {
   document.getElementById("wish-image-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") submitWish();
   });
-  document.getElementById("wish-map-input").addEventListener("keydown", (e) => {
+  document.getElementById("wish-map-link-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submitWish();
+  });
+  document.getElementById("wish-map-address-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") submitWish();
   });
 }
@@ -1885,7 +1900,8 @@ function renderEditWishModal(dayId, spotId, wish) {
   openModal("編輯留言", `
     <div class="form-row"><label>內容</label><textarea id="wish-edit-text" rows="3" placeholder="想去...想吃...">${escapeHtml(wish.text || "")}</textarea></div>
     <div class="form-row"><label>圖片網址（選填）</label><input type="text" id="wish-edit-image" value="${escapeHtml(wish.imageUrl || "")}" placeholder="https://..."></div>
-    <div class="form-row"><label>地點／Google地圖連結（選填）</label><input type="text" id="wish-edit-map" value="${escapeHtml(wish.mapUrl || "")}" placeholder="地點名稱或 https://..."></div>
+    <div class="form-row"><label>Google 地圖連結（選填）</label><input type="text" id="wish-edit-map-link" value="${escapeHtml(wish.mapUrl || "")}" placeholder="例如 https://maps.app.goo.gl/3yRm2VmBV6d4LFRN8"></div>
+    <div class="form-row"><label>地址／地點（選填，沒填連結時會用這個搜尋）</label><input type="text" id="wish-edit-map-address" value="${escapeHtml(wish.mapAddress || "")}" placeholder="例如：淺草寺"></div>
     <div class="form-actions">
       <button class="secondary-btn" id="wish-edit-cancel">取消</button>
       <button class="primary-btn" id="wish-edit-save">儲存</button>
@@ -1895,10 +1911,11 @@ function renderEditWishModal(dayId, spotId, wish) {
   document.getElementById("wish-edit-save").onclick = async () => {
     const text = document.getElementById("wish-edit-text").value.trim();
     const imageUrl = document.getElementById("wish-edit-image").value.trim();
-    const mapUrl = document.getElementById("wish-edit-map").value.trim();
+    const mapUrl = document.getElementById("wish-edit-map-link").value.trim();
+    const mapAddress = document.getElementById("wish-edit-map-address").value.trim();
     if (!text && !imageUrl) return toast("內容和圖片網址不能都空白");
     closeModal();
-    await updateWish(dayId, spotId, wish.id, { text, imageUrl: imageUrl || null, mapUrl: mapUrl || null });
+    await updateWish(dayId, spotId, wish.id, { text, imageUrl: imageUrl || null, mapUrl: mapUrl || null, mapAddress: mapAddress || null });
   };
 }
 
@@ -1908,8 +1925,9 @@ function renderEditSpotMetaModal(dayId, spot) {
     <div class="form-row"><label>時間</label><input type="time" id="spot-time" value="${escapeHtml(spot.time || "")}"></div>
     <div class="form-row">
       <label>Google 地圖連結（選填）</label>
-      <input type="text" id="spot-mapurl" value="${escapeHtml(spot.mapUrl || "")}" placeholder="留空則自動用名稱搜尋，也可貼 Google 地圖連結或改成別的關鍵字">
+      <input type="text" id="spot-mapurl" value="${escapeHtml(spot.mapUrl || "")}" placeholder="例如 https://maps.app.goo.gl/3yRm2VmBV6d4LFRN8">
     </div>
+    <p style="font-size:12px;color:var(--text-muted);margin:-6px 0 12px;">沒填的話，會用上面的「名稱」欄位到 Google 地圖搜尋</p>
     <div class="form-actions">
       <button class="secondary-btn" id="spot-cancel">取消</button>
       <button class="primary-btn" id="spot-confirm">儲存</button>
