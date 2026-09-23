@@ -324,11 +324,16 @@ function parseHash() {
   // #/trip/TRIPID/day/DAYID/spot/SPOTID
   // #/trip/TRIPID/expenses
   // #/import/CODE
+  // #/s/CODE  （分享行程用的短代碼）
   const h = window.location.hash.replace(/^#\/?/, "");
   const parts = h.split("/").filter(Boolean);
   const result = {};
   if (parts[0] === "import" && parts[1]) {
     result.importCode = decodeURIComponent(parts[1]);
+    return result;
+  }
+  if (parts[0] === "s" && parts[1]) {
+    result.shortCode = decodeURIComponent(parts[1]);
     return result;
   }
   if (parts[0] === "trip" && parts[1]) {
@@ -350,6 +355,11 @@ async function route() {
 
   if (r.importCode) {
     importSyncCode(r.importCode);
+    return;
+  }
+
+  if (r.shortCode) {
+    resolveTripShortCode(r.shortCode);
     return;
   }
 
@@ -403,6 +413,17 @@ async function route() {
   }
 }
 
+
+async function resolveTripShortCode(code) {
+  renderLoading();
+  const data = await getShortlinkData(code);
+  if (!data || data.type !== "trip" || !data.tripId) {
+    toast("這組行程代碼或連結已失效，請確認是否輸入正確");
+    navigate("");
+    return;
+  }
+  navigate(`#/trip/${data.tripId}`);
+}
 
 // ------------------------------------------------------------
 // Firestore：行程（trip）
@@ -748,15 +769,63 @@ function renderMemberSwitchModal() {
 }
 
 document.getElementById("share-btn").addEventListener("click", () => {
-  const url = `${window.location.origin}${window.location.pathname}#/trip/${state.tripId}`;
-  if (navigator.share) {
-    navigator.share({ title: state.trip?.name || "旅行行程", url }).catch(() => {});
-  } else if (navigator.clipboard) {
-    navigator.clipboard.writeText(url).then(() => toast("連結已複製，傳給同行的人吧！"));
-  } else {
-    openModal("分享連結", `<div class="form-row"><input type="text" readonly value="${escapeHtml(url)}" onclick="this.select()"></div>`);
-  }
+  renderShareTripModal();
 });
+
+async function ensureTripShareCode() {
+  if (state.trip && state.trip.shareCode) return state.trip.shareCode;
+  const code = await createShortlink({ type: "trip", tripId: state.tripId });
+  if (!code) return null;
+  try {
+    await updateDoc(doc(db, "trips", state.tripId), { shareCode: code });
+  } catch {
+    // 就算存回行程資料失敗，這組代碼本身仍然有效，仍可繼續使用
+  }
+  return code;
+}
+
+async function renderShareTripModal() {
+  openModal("分享此行程", `<p style="color:var(--text-muted);">正在產生短連結...</p>`);
+  const code = await ensureTripShareCode();
+  if (!code) {
+    openModal("分享此行程", `
+      <p style="color:var(--danger);">連結產生失敗，請確認網路連線後再試一次。</p>
+      <div class="form-actions"><button class="secondary-btn" id="share-close-btn">關閉</button></div>
+    `);
+    document.getElementById("share-close-btn").onclick = closeModal;
+    return;
+  }
+  const link = `${window.location.origin}${window.location.pathname}#/s/${code}`;
+
+  openModal("分享此行程", `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">把下面的短連結或代碼傳給同行的人，他們打開連結，或在左側選單「用連結／代碼加入行程」貼上代碼，都能加入這個行程。</p>
+    <div class="form-row">
+      <label>短連結</label>
+      <input type="text" id="share-link-input" readonly value="${escapeHtml(link)}" onclick="this.select()">
+    </div>
+    <button class="secondary-btn full-width" id="copy-share-link-btn">📋 複製連結</button>
+
+    <div class="form-row" style="margin-top:14px;">
+      <label>行程代碼</label>
+      <input type="text" id="share-code-input" readonly value="${escapeHtml(code)}" onclick="this.select()" style="font-size:20px;letter-spacing:3px;text-align:center;font-weight:700;">
+    </div>
+    <button class="secondary-btn full-width" id="copy-share-code-btn">📋 複製代碼</button>
+
+    <div class="form-actions">
+      ${navigator.share ? `<button class="secondary-btn" id="native-share-btn">📤 用系統分享</button>` : ""}
+      <button class="primary-btn" id="share-close-btn">完成</button>
+    </div>
+  `);
+  document.getElementById("share-close-btn").onclick = closeModal;
+  document.getElementById("copy-share-link-btn").addEventListener("click", () => copyText(link, "連結已複製"));
+  document.getElementById("copy-share-code-btn").addEventListener("click", () => copyText(code, "代碼已複製"));
+  const nativeBtn = document.getElementById("native-share-btn");
+  if (nativeBtn) {
+    nativeBtn.addEventListener("click", () => {
+      navigator.share({ title: state.trip?.name || "旅行行程", url: link }).catch(() => {});
+    });
+  }
+}
 
 document.getElementById("appearance-btn").addEventListener("click", renderAppearanceModal);
 
@@ -907,7 +976,7 @@ document.getElementById("join-trip-btn").addEventListener("click", () => {
   openModal("用連結／代碼加入行程", `
     <div class="form-row">
       <label>貼上同行人傳給你的連結，或行程代碼</label>
-      <input type="text" id="join-input" placeholder="https://.../#/trip/xxxxxx 或 xxxxxx">
+      <input type="text" id="join-input" placeholder="https://.../#/s/K7XPQ2 或 K7XPQ2">
     </div>
     <div class="form-actions">
       <button class="secondary-btn" id="join-cancel">取消</button>
@@ -915,21 +984,84 @@ document.getElementById("join-trip-btn").addEventListener("click", () => {
     </div>
   `);
   document.getElementById("join-cancel").onclick = closeModal;
-  document.getElementById("join-confirm").onclick = () => {
+  document.getElementById("join-confirm").onclick = async () => {
     const raw = document.getElementById("join-input").value.trim();
     if (!raw) return;
-    let tripId = raw;
-    const m = raw.match(/trip\/([a-zA-Z0-9]+)/);
-    if (m) tripId = m[1];
     closeModal();
-    navigate(`#/trip/${tripId}`);
+    await handleJoinInput(raw);
   };
 });
+
+async function handleJoinInput(raw) {
+  // 完整的舊版行程連結：.../#/trip/xxxxxx（也支援單純貼 Firestore 行程 ID 的舊用法）
+  let m = raw.match(/trip\/([a-zA-Z0-9]+)/);
+  if (m) {
+    navigate(`#/trip/${m[1]}`);
+    return;
+  }
+  // 短連結格式：.../#/s/CODE，或直接貼代碼本身
+  m = raw.match(/\/s\/([a-zA-Z0-9]+)/);
+  const code = (m ? m[1] : raw).toUpperCase();
+  if (code.length <= 8) {
+    renderLoading();
+    const data = await getShortlinkData(code);
+    if (data && data.type === "trip" && data.tripId) {
+      navigate(`#/trip/${data.tripId}`);
+      return;
+    }
+    toast("找不到這組代碼，請確認輸入正確，或改貼完整連結");
+    navigate("");
+    return;
+  }
+  // 長度看起來不像短代碼，當作行程 ID 直接嘗試
+  navigate(`#/trip/${raw}`);
+}
+
+// ------------------------------------------------------------
+// 短代碼／短連結（shortlinks 集合）
+// 用一組 6 碼英數字代碼取代原本又長又難輸入的行程 ID／同步資料，
+// 存一份對照資料在 Firestore 的 shortlinks/{code}，任何人都能用代碼查（get），
+// 但無法列出所有代碼、也無法竄改或刪除已存在的代碼（見 README 的安全規則）。
+// ------------------------------------------------------------
+const SHORT_CODE_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"; // 排除容易看錯的 0/O/1/I/L
+function genShortCode(len = 6) {
+  let s = "";
+  for (let i = 0; i < len; i++) s += SHORT_CODE_CHARS[Math.floor(Math.random() * SHORT_CODE_CHARS.length)];
+  return s;
+}
+async function createShortlink(data, attempts = 6) {
+  for (let i = 0; i < attempts; i++) {
+    const code = genShortCode();
+    try {
+      await setDoc(doc(db, "shortlinks", code), { ...data, createdAt: serverTimestamp() });
+      return code;
+    } catch {
+      // 代碼剛好撞到別人已經用過的（極少見），重新抽一組再試
+    }
+  }
+  return null;
+}
+async function getShortlinkData(code) {
+  try {
+    const snap = await getDoc(doc(db, "shortlinks", String(code).trim().toUpperCase()));
+    if (!snap.exists()) return null;
+    return snap.data();
+  } catch {
+    return null;
+  }
+}
+function copyText(text, successMsg) {
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(text).then(() => toast(successMsg));
+  } else {
+    toast("請手動複製");
+  }
+}
 
 // ------------------------------------------------------------
 // 跨裝置同步「我的行程」清單
 // 因為沒有帳號登入，這份清單只存在單一瀏覽器裡。
-// 這個功能讓使用者把清單打包成一段代碼／連結，帶到另一台裝置匯入。
+// 這個功能讓使用者把清單打包成一組短代碼／短連結，帶到另一台裝置匯入。
 // ------------------------------------------------------------
 function encodeSyncCode(list) {
   return btoa(encodeURIComponent(JSON.stringify(list)));
@@ -938,20 +1070,11 @@ function decodeSyncCode(code) {
   return JSON.parse(decodeURIComponent(atob(code)));
 }
 
-function importSyncCode(code) {
-  let incoming;
-  try {
-    incoming = decodeSyncCode(code);
-    if (!Array.isArray(incoming)) throw new Error("格式錯誤");
-  } catch {
-    toast("同步代碼無效，請確認複製完整");
-    navigate("");
-    return;
-  }
+function applyIncomingTripList(list) {
   const existing = getMyTrips();
   const existingIds = new Set(existing.map((t) => t.id));
   let addedCount = 0;
-  incoming.forEach((t) => {
+  list.forEach((t) => {
     if (t && t.id && t.name && !existingIds.has(t.id)) {
       existing.push({ id: t.id, name: t.name });
       existingIds.add(t.id);
@@ -963,19 +1086,49 @@ function importSyncCode(code) {
   navigate("");
 }
 
+async function importSyncCode(rawCode) {
+  // 相容舊版連結：舊連結會把整份清單直接編碼在網址裡
+  try {
+    const legacy = decodeSyncCode(rawCode);
+    if (Array.isArray(legacy)) {
+      applyIncomingTripList(legacy);
+      return;
+    }
+  } catch {
+    // 不是舊格式，當作新版的 Firestore 短代碼繼續查詢
+  }
+  renderLoading();
+  const data = await getShortlinkData(rawCode);
+  if (!data || data.type !== "sync" || !Array.isArray(data.list)) {
+    toast("同步代碼無效或已失效，請確認複製完整");
+    navigate("");
+    return;
+  }
+  applyIncomingTripList(data.list);
+}
+
 document.getElementById("sync-devices-btn").addEventListener("click", () => {
   closeMenu();
   renderSyncDevicesModal();
 });
 
-function renderSyncDevicesModal() {
+async function renderSyncDevicesModal() {
   const trips = getMyTrips();
-  const code = encodeSyncCode(trips);
-  const link = `${window.location.origin}${window.location.pathname}#/import/${encodeURIComponent(code)}`;
+  openModal("跨裝置同步清單", `<p style="color:var(--text-muted);">正在產生同步代碼...</p>`);
+  const code = await createShortlink({ type: "sync", list: trips });
+  if (!code) {
+    openModal("跨裝置同步清單", `
+      <p style="color:var(--danger);">代碼產生失敗，請確認網路連線後再試一次。</p>
+      <div class="form-actions"><button class="secondary-btn" id="sync-close-btn">關閉</button></div>
+    `);
+    document.getElementById("sync-close-btn").onclick = closeModal;
+    return;
+  }
+  const link = `${window.location.origin}${window.location.pathname}#/import/${code}`;
 
   openModal("跨裝置同步清單", `
     <p style="font-size:13px;color:var(--text-muted);margin-top:0;">
-      在這台裝置上，把下面的連結傳給你自己（例如用 LINE「傳給自己」），在另一台裝置打開，就能把目前的 ${trips.length} 個行程一次加進那台裝置的清單。
+      在這台裝置上，把下面的短連結或代碼傳給你自己（例如用 LINE「傳給自己」），在另一台裝置打開連結、或在下方貼上代碼匯入，就能把目前的 ${trips.length} 個行程一次加進那台裝置的清單。
     </p>
     <div class="form-row">
       <label>同步連結</label>
@@ -983,9 +1136,15 @@ function renderSyncDevicesModal() {
     </div>
     <button class="secondary-btn full-width" id="copy-sync-link-btn">📋 複製連結</button>
 
+    <div class="form-row" style="margin-top:14px;">
+      <label>同步代碼</label>
+      <input type="text" id="sync-code" readonly value="${escapeHtml(code)}" onclick="this.select()" style="font-size:20px;letter-spacing:3px;text-align:center;font-weight:700;">
+    </div>
+    <button class="secondary-btn full-width" id="copy-sync-code-btn">📋 複製代碼</button>
+
     <div style="margin:20px 0 12px;border-top:1px dashed var(--border);"></div>
 
-    <p style="font-size:13px;color:var(--text-muted);">或者，如果你手上已經有別台裝置給你的同步代碼／連結，貼在這裡匯入：</p>
+    <p style="font-size:13px;color:var(--text-muted);">或者，如果你手上已經有別台裝置給你的同步連結或代碼，貼在這裡匯入：</p>
     <div class="form-row" style="display:flex;gap:8px;">
       <input type="text" id="import-code-input" placeholder="貼上同步連結或代碼" style="flex:1;">
       <button class="primary-btn" id="import-code-btn">匯入</button>
@@ -995,22 +1154,16 @@ function renderSyncDevicesModal() {
     </div>
   `);
   document.getElementById("sync-close-btn").onclick = closeModal;
-  document.getElementById("copy-sync-link-btn").addEventListener("click", () => {
-    if (navigator.clipboard) {
-      navigator.clipboard.writeText(link).then(() => toast("連結已複製"));
-    } else {
-      document.getElementById("sync-link").select();
-      toast("請手動複製上方連結");
-    }
-  });
+  document.getElementById("copy-sync-link-btn").addEventListener("click", () => copyText(link, "連結已複製"));
+  document.getElementById("copy-sync-code-btn").addEventListener("click", () => copyText(code, "代碼已複製"));
   document.getElementById("import-code-btn").addEventListener("click", () => {
     const raw = document.getElementById("import-code-input").value.trim();
     if (!raw) return;
-    let code = raw;
+    let inputCode = raw;
     const m = raw.match(/import\/([^/?#]+)/);
-    if (m) code = decodeURIComponent(m[1]);
+    if (m) inputCode = decodeURIComponent(m[1]);
     closeModal();
-    importSyncCode(code);
+    importSyncCode(inputCode);
   });
 }
 
