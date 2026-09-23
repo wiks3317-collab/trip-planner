@@ -1478,7 +1478,9 @@ function renderTripHome() {
         moveSpot(day.id, idx, btn.dataset.move === "up" ? -1 : 1);
       });
     });
-    enableDragReorder(spotListEl, ".spot-item", (from, to) => reorderSpots(day.id, from, to));
+    if (canEdit) {
+      enableDragReorder(spotListEl, ".spot-item", (from, to) => reorderSpots(day.id, from, to));
+    }
   }
 }
 
@@ -1542,7 +1544,9 @@ function renderDaySelectSheet() {
       moveDay(idx, btn.dataset.move === "up" ? -1 : 1);
     });
   });
-  enableDragReorder(document.querySelector("#modal-box .day-select-list"), ".day-select-item", (from, to) => reorderDays(from, to));
+  if (canEditItinerary()) {
+    enableDragReorder(document.querySelector("#modal-box .day-select-list"), ".day-select-item", (from, to) => reorderDays(from, to));
+  }
   const addBtn = document.getElementById("sheet-add-day-btn");
   if (addBtn) addBtn.addEventListener("click", () => { closeModal(); renderAddDayModal(); });
 }
@@ -1673,6 +1677,7 @@ function enableDragReorder(container, itemSelector, onMove) {
 }
 
 async function reorderDays(from, to) {
+  if (!canEditItinerary()) return;
   if (from === to || from < 0 || to < 0 || from >= state.days.length || to >= state.days.length) return;
   const arr = [...state.days];
   const [moved] = arr.splice(from, 1);
@@ -1683,6 +1688,7 @@ async function reorderDays(from, to) {
 }
 
 async function reorderSpots(dayId, from, to) {
+  if (!canEditItinerary()) return;
   if (from === to || from < 0 || to < 0 || from >= state.spots.length || to >= state.spots.length) return;
   const arr = [...state.spots];
   const [moved] = arr.splice(from, 1);
