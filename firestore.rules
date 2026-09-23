@@ -1,28 +1,88 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // 目前採用匿名登入 + 行程內自行選擇成員身份。
-    // 因此 Rules 可以確認「已登入」，但無法辨識使用者在行程內選了哪個成員。
-    // 介面權限仍屬軟性權限；請勿存放敏感資料。
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function tripDoc(tripId) {
+      return get(/databases/$(database)/documents/trips/$(tripId));
+    }
+
+    function isLegacyTrip(tripId) {
+      return !('authModelVersion' in tripDoc(tripId).data)
+        || !('ownerUid' in tripDoc(tripId).data)
+        || !('access' in tripDoc(tripId).data);
+    }
+
+    function isOwner(tripId) {
+      return signedIn() && tripDoc(tripId).data.ownerUid == request.auth.uid;
+    }
+
+    function role(tripId) {
+      return signedIn()
+        ? tripDoc(tripId).data.access[request.auth.uid]
+        : null;
+    }
+
+    function canEdit(tripId) {
+      return isOwner(tripId) || role(tripId) == 'owner' || role(tripId) == 'editor';
+    }
+
+    function canReadTrip(tripId) {
+      return isLegacyTrip(tripId)
+        || isOwner(tripId)
+        || role(tripId) == 'owner'
+        || role(tripId) == 'editor'
+        || role(tripId) == 'viewer';
+    }
+
     match /trips/{tripId} {
-      allow get: if request.auth != null;
-      allow list: if false;
-      allow create: if request.auth != null
+      allow create: if signedIn()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.access[request.auth.uid] == 'owner'
         && request.resource.data.name is string
-        && request.resource.data.members is list
-        && request.resource.data.members.size() > 0;
-      allow update: if request.auth != null;
+        && request.resource.data.members is list;
+
+      // 過渡期：舊行程仍可被登入使用者讀取，讓既有資料不會因更新規則而立即失聯。
+      allow get: if signedIn() && canReadTrip(tripId);
+      allow list: if false;
+
+      // 舊行程只能進行一次性認領：新資料必須把目前登入 UID 設為 owner。
+      // 認領前的舊行程仍存在「任何已登入者都可能先認領」的過渡期風險，完成認領後即改由 UID 控管。
+      allow update: if isOwner(tripId)
+        || (signedIn()
+          && isLegacyTrip(tripId)
+          && request.resource.data.ownerUid == request.auth.uid
+          && request.resource.data.access[request.auth.uid] == 'owner'
+          && request.resource.data.authModelVersion == 2);
       allow delete: if false;
 
-      match /{document=**} {
-        allow read, write: if request.auth != null;
+      match /days/{dayId} {
+        allow read: if signedIn() && canReadTrip(tripId);
+        allow create, update, delete: if signedIn() && (isLegacyTrip(tripId) || canEdit(tripId));
+
+        match /spots/{spotId} {
+          allow read: if signedIn() && canReadTrip(tripId);
+          allow create, update, delete: if signedIn() && (isLegacyTrip(tripId) || canEdit(tripId));
+
+          match /wishes/{wishId} {
+            allow read: if signedIn() && canReadTrip(tripId);
+            allow create, update, delete: if signedIn() && (isLegacyTrip(tripId) || canEdit(tripId));
+          }
+        }
+      }
+
+      match /expenses/{expenseId} {
+        allow read: if signedIn() && canReadTrip(tripId);
+        allow create, update, delete: if signedIn() && (isLegacyTrip(tripId) || canEdit(tripId));
       }
     }
 
     match /shortlinks/{code} {
-      allow get: if request.auth != null;
+      allow get: if signedIn();
       allow list: if false;
-      allow create: if request.auth != null;
+      allow create: if signedIn();
       allow update, delete: if false;
     }
   }
