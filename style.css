@@ -389,6 +389,8 @@ h1, h2, h3 { font-family: var(--font-heading); }
 }
 .wish-author { font-size: 12px; font-weight: 700; color: color-mix(in srgb, var(--accent) 70%, black); }
 .wish-text { font-size: 14px; margin-top: 3px; white-space: pre-wrap; }
+.wish-image { margin-top: 8px; }
+.wish-image img { max-width: 100%; max-height: 320px; object-fit: cover; border-radius: var(--radius-sm); display: block; }
 .wish-time { font-size: 11px; color: var(--text-muted); margin-top: 5px; }
 
 /* ================= Expenses ================= */
