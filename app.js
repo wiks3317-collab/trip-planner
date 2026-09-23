@@ -1455,7 +1455,7 @@ function renderTripHome() {
     spotListEl.innerHTML = `<div class="empty-hint">這天還沒有安排景點</div>`;
   } else {
     spotListEl.innerHTML = state.spots.map((s, i) => `
-      <div class="spot-item" data-spotid="${s.id}">
+      <div class="spot-item" data-spotid="${s.id}" data-idx="${i}">
         ${canEdit ? `
           <div class="reorder-col">
             <button class="reorder-btn" data-move="up" data-idx="${i}" ${i === 0 ? "disabled" : ""}>▲</button>
@@ -1478,6 +1478,7 @@ function renderTripHome() {
         moveSpot(day.id, idx, btn.dataset.move === "up" ? -1 : 1);
       });
     });
+    enableDragReorder(spotListEl, ".spot-item", (from, to) => reorderSpots(day.id, from, to));
   }
 }
 
@@ -1511,7 +1512,7 @@ function renderDaySelectSheet() {
   openModal("選擇天數", `
     <div class="day-select-list">
       ${state.days.map((d, i) => `
-        <div class="day-select-item ${d.id === state.currentDayId ? "active" : ""}" data-dayid="${d.id}">
+        <div class="day-select-item ${d.id === state.currentDayId ? "active" : ""}" data-dayid="${d.id}" data-idx="${i}">
           ${canEdit ? `
             <div class="reorder-col">
               <button class="reorder-btn" data-move="up" data-idx="${i}" ${i === 0 ? "disabled" : ""}>▲</button>
@@ -1541,6 +1542,7 @@ function renderDaySelectSheet() {
       moveDay(idx, btn.dataset.move === "up" ? -1 : 1);
     });
   });
+  enableDragReorder(document.querySelector("#modal-box .day-select-list"), ".day-select-item", (from, to) => reorderDays(from, to));
   const addBtn = document.getElementById("sheet-add-day-btn");
   if (addBtn) addBtn.addEventListener("click", () => { closeModal(); renderAddDayModal(); });
 }
@@ -1636,6 +1638,60 @@ function renderBlockView(block) {
   return "";
 }
 
+function enableDragReorder(container, itemSelector, onMove) {
+  let dragged = null;
+  container.querySelectorAll(itemSelector).forEach((item) => {
+    item.setAttribute("draggable", "true");
+    item.classList.add("drag-sort-item");
+    item.addEventListener("dragstart", (e) => {
+      dragged = item;
+      item.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", item.dataset.idx || item.dataset.dayidx || item.dataset.spotidx || "");
+    });
+    item.addEventListener("dragover", (e) => {
+      if (!dragged || dragged === item) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      item.classList.add("drag-over");
+    });
+    item.addEventListener("dragleave", () => item.classList.remove("drag-over"));
+    item.addEventListener("drop", (e) => {
+      e.preventDefault();
+      item.classList.remove("drag-over");
+      if (!dragged || dragged === item) return;
+      const from = Number(dragged.dataset.idx ?? dragged.dataset.dayidx ?? dragged.dataset.spotidx);
+      const to = Number(item.dataset.idx ?? item.dataset.dayidx ?? item.dataset.spotidx);
+      if (Number.isInteger(from) && Number.isInteger(to) && from !== to) onMove(from, to);
+    });
+    item.addEventListener("dragend", () => {
+      item.classList.remove("dragging");
+      container.querySelectorAll(".drag-over").forEach((el) => el.classList.remove("drag-over"));
+      dragged = null;
+    });
+  });
+}
+
+async function reorderDays(from, to) {
+  if (from === to || from < 0 || to < 0 || from >= state.days.length || to >= state.days.length) return;
+  const arr = [...state.days];
+  const [moved] = arr.splice(from, 1);
+  arr.splice(to, 0, moved);
+  const batch = writeBatch(db);
+  arr.forEach((day, index) => batch.update(doc(db, "trips", state.tripId, "days", day.id), { order: index }));
+  await batch.commit();
+}
+
+async function reorderSpots(dayId, from, to) {
+  if (from === to || from < 0 || to < 0 || from >= state.spots.length || to >= state.spots.length) return;
+  const arr = [...state.spots];
+  const [moved] = arr.splice(from, 1);
+  arr.splice(to, 0, moved);
+  const batch = writeBatch(db);
+  arr.forEach((spot, index) => batch.update(doc(db, "trips", state.tripId, "days", dayId, "spots", spot.id), { order: index }));
+  await batch.commit();
+}
+
 function renderContentBlocks(container, blocks, { editable, onChange }) {
   const list = blocks || [];
   container.innerHTML = `
@@ -1666,6 +1722,13 @@ function renderContentBlocks(container, blocks, { editable, onChange }) {
   }
 
   if (!editable) return;
+
+  enableDragReorder(renderEl, ".content-block", (from, to) => {
+    const arr = [...list];
+    const [moved] = arr.splice(from, 1);
+    arr.splice(to, 0, moved);
+    onChange(arr);
+  });
 
   container.querySelectorAll("[data-add]").forEach((btn) => {
     btn.addEventListener("click", () => renderBlockEditModal(btn.dataset.add, null, (newBlock) => {
