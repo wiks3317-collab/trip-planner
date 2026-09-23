@@ -646,6 +646,30 @@ async function copySpotToDay(spot, targetDayId) {
     createdAt: serverTimestamp(),
   });
 }
+// 把一個景點搬移到另一個天數：在目標天數建立一份一模一樣的景點（含許願池留言），
+// 再把原本天數底下的這個景點刪除，等於是「搬過去」而不是複製。
+async function moveSpotToDay(sourceDayId, spot, targetDayId) {
+  const targetSpotsSnap = await getDocs(collection(db, "trips", state.tripId, "days", targetDayId, "spots"));
+  const order = targetSpotsSnap.size;
+  const newSpotRef = doc(collection(db, "trips", state.tripId, "days", targetDayId, "spots"));
+  const wishesSnap = await getDocs(collection(db, "trips", state.tripId, "days", sourceDayId, "spots", spot.id, "wishes"));
+  const batch = writeBatch(db);
+  batch.set(newSpotRef, {
+    title: spot.title,
+    time: spot.time || "",
+    blocks: spot.blocks || [],
+    mapUrl: spot.mapUrl || null,
+    order,
+    createdAt: serverTimestamp(),
+  });
+  wishesSnap.docs.forEach((d) => {
+    const newWishRef = doc(collection(db, "trips", state.tripId, "days", targetDayId, "spots", newSpotRef.id, "wishes"));
+    batch.set(newWishRef, d.data());
+    batch.delete(d.ref);
+  });
+  batch.delete(doc(db, "trips", state.tripId, "days", sourceDayId, "spots", spot.id));
+  await batch.commit();
+}
 async function moveSpot(dayId, idx, delta) {
   const arr = state.spots;
   const j = idx + delta;
@@ -1440,7 +1464,6 @@ function renderTripHome() {
         ` : ""}
         <div class="spot-time">${escapeHtml(s.time || "")}</div>
         <div class="spot-title" data-nav="${s.id}">${escapeHtml(s.title)}</div>
-        ${canEdit ? `<button class="icon-btn copy-spot-btn" data-copyspotid="${s.id}" title="複製到其他日期" style="font-size:15px;padding:5px 7px;">📋</button>` : ""}
         <div data-nav="${s.id}">›</div>
       </div>`).join("");
     spotListEl.querySelectorAll("[data-nav]").forEach((el) => {
@@ -1453,13 +1476,6 @@ function renderTripHome() {
         e.stopPropagation();
         const idx = Number(btn.dataset.idx);
         moveSpot(day.id, idx, btn.dataset.move === "up" ? -1 : 1);
-      });
-    });
-    spotListEl.querySelectorAll(".copy-spot-btn").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        const spot = state.spots.find((s) => s.id === btn.dataset.copyspotid);
-        if (spot) renderCopySpotModal(day.id, spot);
       });
     });
   }
@@ -1792,6 +1808,7 @@ function renderSpotPage() {
           <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
             <button class="secondary-btn small-btn" id="edit-spot-meta-btn">編輯</button>
             <button class="secondary-btn small-btn" id="copy-spot-meta-btn">📋 複製</button>
+            <button class="secondary-btn small-btn" id="move-spot-meta-btn">🚚 搬移</button>
             <button class="danger-btn small-btn" id="delete-spot-btn">刪除</button>
           </div>` : ""}
       </div>
@@ -1829,7 +1846,8 @@ function renderSpotPage() {
 
   if (canEdit) {
     document.getElementById("edit-spot-meta-btn").addEventListener("click", () => renderEditSpotMetaModal(day.id, spot));
-    document.getElementById("copy-spot-meta-btn").addEventListener("click", () => renderCopySpotModal(day.id, spot));
+    document.getElementById("copy-spot-meta-btn").addEventListener("click", () => renderSpotDayPickerModal(day.id, spot, "copy"));
+    document.getElementById("move-spot-meta-btn").addEventListener("click", () => renderSpotDayPickerModal(day.id, spot, "move"));
     document.getElementById("delete-spot-btn").addEventListener("click", () => {
       openConfirm(`確定要刪除「${spot.title}」嗎？`, async () => {
         await deleteSpot(day.id, spot.id);
@@ -1943,32 +1961,43 @@ function renderEditWishModal(dayId, spotId, wish) {
   };
 }
 
-function renderCopySpotModal(sourceDayId, spot) {
+function renderSpotDayPickerModal(sourceDayId, spot, mode) {
+  const isMove = mode === "move";
   const otherDays = state.days.filter((d) => d.id !== sourceDayId);
   const sameDay = state.days.find((d) => d.id === sourceDayId);
   const dayRow = (d) => `
-    <div class="card spot-item" data-copy-dayid="${d.id}" style="cursor:pointer;">
+    <div class="card spot-item" data-pick-dayid="${d.id}" style="cursor:pointer;">
       <div class="spot-title" style="flex:1;">${escapeHtml(d.title)}${d.date ? `<span style="color:var(--text-muted);font-weight:400;font-size:12.5px;"> ・ ${escapeHtml(d.date)}</span>` : ""}</div>
       <div>›</div>
     </div>`;
-  openModal(`複製「${escapeHtml(spot.title)}」到...`, `
-    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">選一個天數，會把這個景點（含內容與地圖設定）複製過去，原本的不會受影響；許願池留言不會一起複製。</p>
+  openModal(`${isMove ? "搬移" : "複製"}「${escapeHtml(spot.title)}」到...`, `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">
+      ${isMove
+        ? "選一個天數，會把這個景點（含內容、地圖設定與許願池留言）搬過去，原本天數底下就不會再有這個景點。"
+        : "選一個天數，會把這個景點（含內容與地圖設定）複製過去，原本的不會受影響；許願池留言不會一起複製。"}
+    </p>
     <div style="display:flex;flex-direction:column;gap:8px;max-height:50vh;overflow-y:auto;">
-      ${otherDays.length ? otherDays.map(dayRow).join("") : `<div class="empty-hint">目前沒有其他天數可以複製過去</div>`}
-      ${sameDay ? `<div style="border-top:1px solid var(--border);margin-top:4px;padding-top:8px;">${dayRow(sameDay)}<div style="font-size:12px;color:var(--text-muted);margin-top:-4px;">↑ 複製一份到同一天（例如同一個地方要去兩次）</div></div>` : ""}
+      ${otherDays.length ? otherDays.map(dayRow).join("") : `<div class="empty-hint">目前沒有其他天數可以${isMove ? "搬" : "複製"}過去</div>`}
+      ${(!isMove && sameDay) ? `<div style="border-top:1px solid var(--border);margin-top:4px;padding-top:8px;">${dayRow(sameDay)}<div style="font-size:12px;color:var(--text-muted);margin-top:-4px;">↑ 複製一份到同一天（例如同一個地方要去兩次）</div></div>` : ""}
     </div>
     <div class="form-actions">
-      <button class="secondary-btn" id="copy-spot-cancel">取消</button>
+      <button class="secondary-btn" id="spot-daypicker-cancel">取消</button>
     </div>
   `);
-  document.getElementById("copy-spot-cancel").onclick = closeModal;
-  document.querySelectorAll("[data-copy-dayid]").forEach((el) => {
+  document.getElementById("spot-daypicker-cancel").onclick = closeModal;
+  document.querySelectorAll("[data-pick-dayid]").forEach((el) => {
     el.addEventListener("click", async () => {
-      const targetDayId = el.dataset.copyDayid;
+      const targetDayId = el.dataset.pickDayid;
       const targetDay = state.days.find((d) => d.id === targetDayId);
       closeModal();
-      await copySpotToDay(spot, targetDayId);
-      toast(`已複製到「${targetDay ? targetDay.title : ""}」`);
+      if (isMove) {
+        await moveSpotToDay(sourceDayId, spot, targetDayId);
+        closeSpotPanel();
+        toast(`已搬移到「${targetDay ? targetDay.title : ""}」`);
+      } else {
+        await copySpotToDay(spot, targetDayId);
+        toast(`已複製到「${targetDay ? targetDay.title : ""}」`);
+      }
     });
   });
 }
