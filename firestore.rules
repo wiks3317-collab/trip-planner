@@ -1,0 +1,29 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 目前採用匿名登入 + 行程內自行選擇成員身份。
+    // 因此 Rules 可以確認「已登入」，但無法辨識使用者在行程內選了哪個成員。
+    // 介面權限仍屬軟性權限；請勿存放敏感資料。
+    match /trips/{tripId} {
+      allow get: if request.auth != null;
+      allow list: if false;
+      allow create: if request.auth != null
+        && request.resource.data.name is string
+        && request.resource.data.members is list
+        && request.resource.data.members.size() > 0;
+      allow update: if request.auth != null;
+      allow delete: if false;
+
+      match /{document=**} {
+        allow read, write: if request.auth != null;
+      }
+    }
+
+    match /shortlinks/{code} {
+      allow get: if request.auth != null;
+      allow list: if false;
+      allow create: if request.auth != null;
+      allow update, delete: if false;
+    }
+  }
+}
