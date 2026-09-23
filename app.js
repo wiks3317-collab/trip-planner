@@ -773,23 +773,24 @@ document.getElementById("share-btn").addEventListener("click", () => {
 });
 
 async function ensureTripShareCode() {
-  if (state.trip && state.trip.shareCode) return state.trip.shareCode;
-  const code = await createShortlink({ type: "trip", tripId: state.tripId });
-  if (!code) return null;
+  if (state.trip && state.trip.shareCode) return { code: state.trip.shareCode, error: null };
+  const result = await createShortlink({ type: "trip", tripId: state.tripId });
+  if (!result.code) return result;
   try {
-    await updateDoc(doc(db, "trips", state.tripId), { shareCode: code });
-  } catch {
+    await updateDoc(doc(db, "trips", state.tripId), { shareCode: result.code });
+  } catch (err) {
+    console.error("[shortlinks] 寫回行程的 shareCode 失敗", err);
     // 就算存回行程資料失敗，這組代碼本身仍然有效，仍可繼續使用
   }
-  return code;
+  return result;
 }
 
 async function renderShareTripModal() {
   openModal("分享此行程", `<p style="color:var(--text-muted);">正在產生短連結...</p>`);
-  const code = await ensureTripShareCode();
+  const { code, error } = await ensureTripShareCode();
   if (!code) {
     openModal("分享此行程", `
-      <p style="color:var(--danger);">連結產生失敗，請確認網路連線後再試一次。</p>
+      <p style="color:var(--danger);">${shortlinkErrorMessage(error)}</p>
       <div class="form-actions"><button class="secondary-btn" id="share-close-btn">關閉</button></div>
     `);
     document.getElementById("share-close-btn").onclick = closeModal;
@@ -1034,21 +1035,33 @@ async function createShortlink(data, attempts = 6) {
     const code = genShortCode();
     try {
       await setDoc(doc(db, "shortlinks", code), { ...data, createdAt: serverTimestamp() });
-      return code;
-    } catch {
-      // 代碼剛好撞到別人已經用過的（極少見），重新抽一組再試
+      return { code, error: null };
+    } catch (err) {
+      console.error("[shortlinks] 建立代碼失敗", err);
+      // 權限被拒（Firestore 規則沒開放）不管重試幾次結果都一樣，直接回報，不要浪費時間重試
+      if (err && err.code === "permission-denied") {
+        return { code: null, error: "permission-denied" };
+      }
+      // 其他錯誤（例如剛好撞到別人已經用過的代碼，極少見）就重新抽一組再試
     }
   }
-  return null;
+  return { code: null, error: "unknown" };
 }
 async function getShortlinkData(code) {
   try {
     const snap = await getDoc(doc(db, "shortlinks", String(code).trim().toUpperCase()));
     if (!snap.exists()) return null;
     return snap.data();
-  } catch {
+  } catch (err) {
+    console.error("[shortlinks] 查詢代碼失敗", err);
     return null;
   }
+}
+function shortlinkErrorMessage(error) {
+  if (error === "permission-denied") {
+    return "連結產生失敗：Firestore 安全規則可能還沒加上 shortlinks 那段設定。請到 Firebase 主控台 → Firestore Database → 規則分頁，確認內容包含 shortlinks 集合的規則（見 README「Part 3：設定 Firestore 安全規則」），改好後記得按「發布」，再回來試一次。";
+  }
+  return "連結產生失敗，請確認網路連線後再試一次。（可以打開瀏覽器開發者工具的 Console 分頁，看看有沒有更詳細的錯誤訊息）";
 }
 function copyText(text, successMsg) {
   if (navigator.clipboard) {
@@ -1115,10 +1128,10 @@ document.getElementById("sync-devices-btn").addEventListener("click", () => {
 async function renderSyncDevicesModal() {
   const trips = getMyTrips();
   openModal("跨裝置同步清單", `<p style="color:var(--text-muted);">正在產生同步代碼...</p>`);
-  const code = await createShortlink({ type: "sync", list: trips });
+  const { code, error } = await createShortlink({ type: "sync", list: trips });
   if (!code) {
     openModal("跨裝置同步清單", `
-      <p style="color:var(--danger);">代碼產生失敗，請確認網路連線後再試一次。</p>
+      <p style="color:var(--danger);">${shortlinkErrorMessage(error)}</p>
       <div class="form-actions"><button class="secondary-btn" id="sync-close-btn">關閉</button></div>
     `);
     document.getElementById("sync-close-btn").onclick = closeModal;
