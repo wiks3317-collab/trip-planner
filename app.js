@@ -164,11 +164,16 @@ function removeMyTrip(id) {
   localStorage.setItem(LS_MY_TRIPS, JSON.stringify(getMyTrips().filter((t) => t.id !== id)));
 }
 function getMyMemberId(tripId) {
+  // 舊版相容用：新版本不再以 localStorage 選擇身份。
   return localStorage.getItem(LS_MEMBER_PREFIX + tripId) || null;
 }
 function setMyMemberId(tripId, memberId) {
+  // 保留舊資料清理能力，但不再由 UI 呼叫來切換權限。
   if (memberId) localStorage.setItem(LS_MEMBER_PREFIX + tripId, memberId);
   else localStorage.removeItem(LS_MEMBER_PREFIX + tripId);
+}
+function currentUid() {
+  return auth.currentUser?.uid || null;
 }
 
 // ------------------------------------------------------------
@@ -271,9 +276,9 @@ function clearAllUnsub() {
 }
 
 function myMember() {
-  if (!state.trip) return null;
-  const id = getMyMemberId(state.tripId);
-  return state.trip.members.find((m) => m.id === id) || null;
+  if (!state.trip || !currentUid()) return null;
+  // 權限以 Firebase Authentication 的 UID 綁定，不再採用前端自行選擇的 memberId。
+  return (state.trip.members || []).find((m) => m.uid === currentUid()) || null;
 }
 function myPermission() {
   const m = myMember();
@@ -410,13 +415,8 @@ async function route() {
   updateHeader();
   renderTripMenu();
 
-  // 進站時若這個裝置在這個行程還沒選過身份，先強制選擇
-  const my = myMember();
-  if (!my && !sessionStorage.getItem("tp_skip_pick_" + r.tripId)) {
-    hideSpotPanel();
-    renderMemberPicker();
-    return;
-  }
+  // 新版不再讓使用者自行選擇成員身份；未綁定 UID 的使用者視為唯讀訪客。
+  // 後續將透過邀請／認領流程正式綁定成員 UID。
 
   if (state.tripSection === "expenses") {
     hideSpotPanel();
@@ -482,9 +482,24 @@ async function loadTrip(tripId) {
 }
 
 async function createTrip(name, members) {
+  const uid = currentUid();
+  let ownerBound = false;
+  const boundMembers = (members || []).map((m) => {
+    const bindThisOwner = !!uid && m.permission === "owner" && !ownerBound;
+    if (bindThisOwner) ownerBound = true;
+    return { ...m, uid: bindThisOwner ? uid : (m.uid || null) };
+  });
+  const owner = boundMembers.find((m) => m.permission === "owner" && m.uid);
+  const access = {};
+  boundMembers.forEach((m) => {
+    if (m.uid && !access[m.uid]) access[m.uid] = m.permission;
+  });
   const ref = await addDoc(collection(db, "trips"), {
     name,
-    members,
+    members: boundMembers,
+    ownerUid: owner?.uid || null,
+    access,
+    authModelVersion: 2,
     createdAt: serverTimestamp(),
   });
   saveMyTrip(ref.id, name);
@@ -492,7 +507,41 @@ async function createTrip(name, members) {
 }
 
 async function updateTripMembers(members) {
-  await updateDoc(doc(db, "trips", state.tripId), { members });
+  const access = {};
+  members.forEach((m) => {
+    if (m.uid) access[m.uid] = m.permission;
+  });
+  await updateDoc(doc(db, "trips", state.tripId), { members, access });
+}
+
+function isLegacyTrip() {
+  return !state.trip?.authModelVersion || !state.trip?.ownerUid || !state.trip?.access;
+}
+
+async function claimLegacyTrip() {
+  const uid = currentUid();
+  if (!uid || !state.trip || !isLegacyTrip()) return;
+  const ownerIndex = (state.trip.members || []).findIndex((m) => m.permission === "owner");
+  if (ownerIndex < 0) {
+    toast("這個舊行程沒有找到統籌人資料，請先在 Firebase Console 確認 members");
+    return;
+  }
+  const members = (state.trip.members || []).map((m, i) => ({
+    ...m,
+    uid: i === ownerIndex ? uid : (m.uid || null),
+  }));
+  const access = {};
+  members.forEach((m) => {
+    if (m.uid) access[m.uid] = m.permission;
+  });
+  await updateDoc(doc(db, "trips", state.tripId), {
+    members,
+    ownerUid: uid,
+    access,
+    authModelVersion: 2,
+    migratedAt: serverTimestamp(),
+  });
+  toast("已將此舊行程綁定到目前裝置的匿名身份");
 }
 
 async function updateTripCurrencies(currencies) {
@@ -773,7 +822,8 @@ function updateHeader() {
   }
 }
 
-document.getElementById("current-member-badge").addEventListener("click", renderMemberSwitchModal);
+// 不再提供「切換身份」入口，避免使用者透過前端選擇其他成員而取得其權限。
+// document.getElementById("current-member-badge").addEventListener("click", renderMemberSwitchModal);
 
 document.getElementById("rename-trip-btn").addEventListener("click", () => {
   if (!state.trip) return;
@@ -1395,10 +1445,24 @@ function renderTripHome() {
       <button class="tab-btn ${state.tripSection === "itinerary" ? "active" : ""}" id="tab-itinerary">📅 行程</button>
       <button class="tab-btn ${state.tripSection === "expenses" ? "active" : ""}" id="tab-expenses">💰 記帳與分帳</button>
     </div>
-    ${!canEditItinerary() ? `<div class="readonly-banner">你目前是唯讀身份，可以瀏覽行程、許願池留言與記帳，但無法新增或編輯行程內容。</div>` : ""}
+    ${isLegacyTrip() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>這是舊版行程資料，目前尚未綁定新的身份權限。</span><button class="secondary-btn small-btn" id="claim-legacy-trip-btn">我是原統籌人，進行資料銜接</button></div>` : (!canEditItinerary() ? `<div class="readonly-banner">你目前是唯讀身份，可以瀏覽行程、許願池留言與記帳，但無法新增或編輯行程內容。</div>` : "")}
     <div id="day-selector-wrap"></div>
     <div id="day-content"></div>
   `;
+
+  const claimBtn = document.getElementById("claim-legacy-trip-btn");
+  if (claimBtn) {
+    claimBtn.onclick = async () => {
+      if (!confirm("請確認你是這個舊行程原本的統籌人。確認後，此行程會綁定目前瀏覽器的匿名身份。")) return;
+      try {
+        claimBtn.disabled = true;
+        await claimLegacyTrip();
+      } catch (err) {
+        console.error(err);
+        toast("資料銜接失敗，請先確認 Firebase 規則仍允許舊資料遷移");
+      }
+    };
+  }
 
   document.getElementById("tab-itinerary").onclick = () => navigate(`#/trip/${state.tripId}${state.currentDayId ? "/day/" + state.currentDayId : ""}`);
   document.getElementById("tab-expenses").onclick = () => navigate(`#/trip/${state.tripId}/expenses`);
@@ -1455,7 +1519,7 @@ function renderTripHome() {
     spotListEl.innerHTML = `<div class="empty-hint">這天還沒有安排景點</div>`;
   } else {
     spotListEl.innerHTML = state.spots.map((s, i) => `
-      <div class="spot-item" data-spotid="${s.id}" data-idx="${i}">
+      <div class="spot-item" data-spotid="${s.id}">
         ${canEdit ? `
           <div class="reorder-col">
             <button class="reorder-btn" data-move="up" data-idx="${i}" ${i === 0 ? "disabled" : ""}>▲</button>
@@ -1478,9 +1542,6 @@ function renderTripHome() {
         moveSpot(day.id, idx, btn.dataset.move === "up" ? -1 : 1);
       });
     });
-    if (canEdit) {
-      enableDragReorder(spotListEl, ".spot-item", (from, to) => reorderSpots(day.id, from, to));
-    }
   }
 }
 
@@ -1514,7 +1575,7 @@ function renderDaySelectSheet() {
   openModal("選擇天數", `
     <div class="day-select-list">
       ${state.days.map((d, i) => `
-        <div class="day-select-item ${d.id === state.currentDayId ? "active" : ""}" data-dayid="${d.id}" data-idx="${i}">
+        <div class="day-select-item ${d.id === state.currentDayId ? "active" : ""}" data-dayid="${d.id}">
           ${canEdit ? `
             <div class="reorder-col">
               <button class="reorder-btn" data-move="up" data-idx="${i}" ${i === 0 ? "disabled" : ""}>▲</button>
@@ -1544,9 +1605,6 @@ function renderDaySelectSheet() {
       moveDay(idx, btn.dataset.move === "up" ? -1 : 1);
     });
   });
-  if (canEditItinerary()) {
-    enableDragReorder(document.querySelector("#modal-box .day-select-list"), ".day-select-item", (from, to) => reorderDays(from, to));
-  }
   const addBtn = document.getElementById("sheet-add-day-btn");
   if (addBtn) addBtn.addEventListener("click", () => { closeModal(); renderAddDayModal(); });
 }
@@ -1642,62 +1700,6 @@ function renderBlockView(block) {
   return "";
 }
 
-function enableDragReorder(container, itemSelector, onMove) {
-  let dragged = null;
-  container.querySelectorAll(itemSelector).forEach((item) => {
-    item.setAttribute("draggable", "true");
-    item.classList.add("drag-sort-item");
-    item.addEventListener("dragstart", (e) => {
-      dragged = item;
-      item.classList.add("dragging");
-      e.dataTransfer.effectAllowed = "move";
-      e.dataTransfer.setData("text/plain", item.dataset.idx || item.dataset.dayidx || item.dataset.spotidx || "");
-    });
-    item.addEventListener("dragover", (e) => {
-      if (!dragged || dragged === item) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
-      item.classList.add("drag-over");
-    });
-    item.addEventListener("dragleave", () => item.classList.remove("drag-over"));
-    item.addEventListener("drop", (e) => {
-      e.preventDefault();
-      item.classList.remove("drag-over");
-      if (!dragged || dragged === item) return;
-      const from = Number(dragged.dataset.idx ?? dragged.dataset.dayidx ?? dragged.dataset.spotidx);
-      const to = Number(item.dataset.idx ?? item.dataset.dayidx ?? item.dataset.spotidx);
-      if (Number.isInteger(from) && Number.isInteger(to) && from !== to) onMove(from, to);
-    });
-    item.addEventListener("dragend", () => {
-      item.classList.remove("dragging");
-      container.querySelectorAll(".drag-over").forEach((el) => el.classList.remove("drag-over"));
-      dragged = null;
-    });
-  });
-}
-
-async function reorderDays(from, to) {
-  if (!canEditItinerary()) return;
-  if (from === to || from < 0 || to < 0 || from >= state.days.length || to >= state.days.length) return;
-  const arr = [...state.days];
-  const [moved] = arr.splice(from, 1);
-  arr.splice(to, 0, moved);
-  const batch = writeBatch(db);
-  arr.forEach((day, index) => batch.update(doc(db, "trips", state.tripId, "days", day.id), { order: index }));
-  await batch.commit();
-}
-
-async function reorderSpots(dayId, from, to) {
-  if (!canEditItinerary()) return;
-  if (from === to || from < 0 || to < 0 || from >= state.spots.length || to >= state.spots.length) return;
-  const arr = [...state.spots];
-  const [moved] = arr.splice(from, 1);
-  arr.splice(to, 0, moved);
-  const batch = writeBatch(db);
-  arr.forEach((spot, index) => batch.update(doc(db, "trips", state.tripId, "days", dayId, "spots", spot.id), { order: index }));
-  await batch.commit();
-}
-
 function renderContentBlocks(container, blocks, { editable, onChange }) {
   const list = blocks || [];
   container.innerHTML = `
@@ -1728,13 +1730,6 @@ function renderContentBlocks(container, blocks, { editable, onChange }) {
   }
 
   if (!editable) return;
-
-  enableDragReorder(renderEl, ".content-block", (from, to) => {
-    const arr = [...list];
-    const [moved] = arr.splice(from, 1);
-    arr.splice(to, 0, moved);
-    onChange(arr);
-  });
 
   container.querySelectorAll("[data-add]").forEach((btn) => {
     btn.addEventListener("click", () => renderBlockEditModal(btn.dataset.add, null, (newBlock) => {
