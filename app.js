@@ -901,9 +901,17 @@ function subscribeExpenses() {
   });
 }
 
+function canManageExpense(expense) {
+  if (canEditItinerary()) return true;
+  return !!expense && expense.createdByUid === currentUid();
+}
+
 async function addExpense({ title, amountCents, currency, payerId, splitWith, date, note }) {
+  const uid = currentUid();
+  if (!uid || !canViewContent()) throw new Error("未登入或尚未綁定行程成員");
   await addDoc(collection(db, "trips", state.tripId, "expenses"), {
     title, amountCents, currency, payerId, splitWith, date, note: note || "",
+    createdByUid: uid,
     createdAt: serverTimestamp(),
   });
 }
@@ -2517,7 +2525,7 @@ function renderExpensesPage() {
     </div>
 
     <div class="section-title">消費明細</div>
-    <button class="primary-btn full-width" id="add-expense-btn" style="margin-bottom:12px;">＋ 新增一筆消費</button>
+    ${canViewContent() ? `<button class="primary-btn full-width" id="add-expense-btn" style="margin-bottom:12px;">＋ 新增一筆消費</button>` : ""}
     <div id="expense-list">
       ${dateKeys.length ? dateKeys.map((dk) => {
         const items = byDate[dk];
@@ -2553,10 +2561,10 @@ function renderExpensesPage() {
                   ${escapeHtml(memberName(e.payerId))} 先付款，由 ${e.splitWith.map(memberName).map(escapeHtml).join("、")} 分攤
                   ${e.note ? ` · ${escapeHtml(e.note)}` : ""}
                 </div>
-                <div style="margin-top:6px;display:flex;gap:6px;">
+                ${canManageExpense(e) ? `<div style="margin-top:6px;display:flex;gap:6px;">
                   <span class="secondary-btn small-btn edit-expense-btn" data-id="${e.id}">編輯</span>
                   <span class="danger-btn small-btn del-expense-btn" data-id="${e.id}">刪除</span>
-                </div>
+                </div>` : ""}
               </div>
             `;
             }).join("")}
@@ -2568,7 +2576,8 @@ function renderExpensesPage() {
 
   document.getElementById("tab-itinerary").onclick = () => navigate(`#/trip/${state.tripId}${state.currentDayId ? "/day/" + state.currentDayId : ""}`);
   document.getElementById("tab-expenses").onclick = () => {};
-  document.getElementById("add-expense-btn").addEventListener("click", () => renderExpenseFormModal(null));
+  const addExpenseBtn = document.getElementById("add-expense-btn");
+  if (addExpenseBtn) addExpenseBtn.addEventListener("click", () => renderExpenseFormModal(null));
   document.getElementById("open-settlement-btn").addEventListener("click", () => renderSettlementModal(transactions));
   const refreshBtn = document.getElementById("refresh-fx-btn");
   if (refreshBtn) refreshBtn.addEventListener("click", () => handleRefreshRates(usedCurrencies));
@@ -2578,11 +2587,13 @@ function renderExpensesPage() {
   root.querySelectorAll(".edit-expense-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const expense = state.expenses.find((e) => e.id === btn.dataset.id);
-      if (expense) renderExpenseFormModal(expense);
+      if (expense && canManageExpense(expense)) renderExpenseFormModal(expense);
     });
   });
   root.querySelectorAll(".del-expense-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
+      const expense = state.expenses.find((e) => e.id === btn.dataset.id);
+      if (!expense || !canManageExpense(expense)) return toast("你只能管理自己新增的明細");
       openConfirm("確定要刪除這筆消費紀錄嗎？", async () => {
         await deleteExpense(btn.dataset.id);
       });
@@ -2689,6 +2700,10 @@ function renderManualFxModal(currencies) {
 }
 
 function renderExpenseFormModal(existing) {
+  if (existing && !canManageExpense(existing)) {
+    toast("你只能管理自己新增的明細");
+    return;
+  }
   const members = state.trip.members;
   const my = myMember();
   const currencies = tripCurrencies();
@@ -2924,11 +2939,48 @@ function renderManageMembersModal() {
       </div>`;
   }
 
+  function openMemberNameEditor(member) {
+    const existing = document.getElementById("member-name-editor-overlay");
+    if (existing) existing.remove();
+    const overlay = document.createElement("div");
+    overlay.id = "member-name-editor-overlay";
+    overlay.style.cssText = "position:fixed;inset:0;z-index:120;background:rgba(20,25,22,.42);display:flex;align-items:center;justify-content:center;padding:20px;";
+    overlay.innerHTML = `
+      <div role="dialog" aria-modal="true" aria-label="修改成員名稱" style="width:100%;max-width:360px;background:var(--card-bg);color:var(--text);border-radius:16px;padding:20px;box-shadow:0 12px 40px rgba(0,0,0,.22);">
+        <div class="modal-title">修改成員名稱</div>
+        <div class="form-row"><label for="member-name-editor-input">成員名稱</label><input id="member-name-editor-input" type="text" maxlength="40" value="${escapeHtml(member.name || "")}" autocomplete="off"></div>
+        <div class="form-actions">
+          <button class="secondary-btn" id="member-name-editor-cancel">取消</button>
+          <button class="primary-btn" id="member-name-editor-save">儲存</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const input = overlay.querySelector("#member-name-editor-input");
+    const closeEditor = () => overlay.remove();
+    overlay.addEventListener("click", (event) => { if (event.target === overlay) closeEditor(); });
+    overlay.querySelector("#member-name-editor-cancel").onclick = closeEditor;
+    overlay.querySelector("#member-name-editor-save").onclick = () => {
+      const name = input.value.trim();
+      if (!name) return toast("請輸入成員名稱");
+      member.name = name;
+      closeEditor();
+      renderRows();
+    };
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") overlay.querySelector("#member-name-editor-save").click();
+      if (event.key === "Escape") closeEditor();
+    });
+    requestAnimationFrame(() => { input.focus(); input.select(); });
+  }
+
   function rowHtml(m) {
     const uidCount = m.uids.length;
     return `
       <div class="block-editor-row" data-row="${m.id}">
-        <input type="text" value="${escapeHtml(m.name)}" data-field="name" data-row="${m.id}" style="flex:1;min-width:100px;padding:8px;border:1px solid var(--border);border-radius:8px;">
+        <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:100px;">
+          <span style="flex:1;min-width:0;overflow-wrap:anywhere;">${escapeHtml(m.name || "未命名成員")}</span>
+          <button type="button" class="icon-btn edit-member-name-btn" data-row="${m.id}" title="修改成員名稱" aria-label="修改成員名稱" style="display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;min-width:34px;min-height:34px;font-size:18px;cursor:pointer;">✏️</button>
+        </div>
         <select data-field="permission" data-row="${m.id}" style="padding:8px;border:1px solid var(--border);border-radius:8px;">
           <option value="owner" ${m.permission === "owner" ? "selected" : ""}>統籌人</option>
           <option value="editor" ${m.permission === "editor" ? "selected" : ""}>可編輯</option>
@@ -2950,9 +3002,10 @@ function renderManageMembersModal() {
       if (panel) panel.style.display = "block";
     });
 
-    wrap.querySelectorAll("input[data-field=name]").forEach((inp) => {
-      inp.addEventListener("input", () => {
-        members.find((x) => x.id === inp.dataset.row).name = inp.value;
+    wrap.querySelectorAll(".edit-member-name-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const member = members.find((x) => x.id === btn.dataset.row);
+        if (member) openMemberNameEditor(member);
       });
     });
     wrap.querySelectorAll("select[data-field=permission]").forEach((sel) => {
@@ -3156,7 +3209,7 @@ function renderManageMembersModal() {
         wrap.innerHTML = `<p style="color:var(--text-muted);font-size:13px;">目前沒有待審核申請。</p>`;
         return;
       }
-      const candidates = members.filter((m) => m.permission !== "owner" && memberUids(m).length === 0);
+      const candidates = members.filter((m) => m.permission !== "owner");
       wrap.innerHTML = requests.map((r) => `
         <div class="card" style="padding:10px;margin-bottom:8px;">
           <div style="font-size:12px;word-break:break-all;">UID：${escapeHtml(r.requestedUid)}</div>
