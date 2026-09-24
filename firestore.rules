@@ -8,9 +8,23 @@ service cloud.firestore {
     // 系統管理員：admins/{uid} 這份文件是否存在，由你在 Firebase Console 手動新增／刪除，
     // 前端完全沒有寫入權限（見下面 admins 的規則）。exists() 是 Rules 內建函式，
     // 不受目標文件自己的讀取規則限制，所以這裡不需要額外開放 admins 的 get 權限也能判斷。
+    // 只認 Google 登入的管理員，匿名身份即使 UID 被誤加進 admins 也不算管理員。
     function isAdmin() {
       return signedIn()
+        && request.auth.token.firebase.sign_in_provider == 'google.com'
         && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    // 具編輯權限的管理員：admins/{uid} 文件需另外設定 canEdit: true（在 Firebase Console 手動設定）。
+    function isAdminEditor() {
+      return isAdmin()
+        && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.get('canEdit', false) == true;
+    }
+
+    // 天數／景點的基本欄位驗證（寬鬆：欄位不存在或為 null 都放行，避免影響既有資料）。
+    function validContentDoc(data) {
+      return (!('title' in data) || data.title == null || (data.title is string && data.title.size() <= 500))
+        && (!('blocks' in data) || data.blocks == null || (data.blocks is list && data.blocks.size() <= 500));
     }
 
     function tripDoc(tripId) {
@@ -165,23 +179,41 @@ service cloud.firestore {
         // 否則已停用的行程會沒辦法被管理員自己改回啟用。
         || (
           isAdmin()
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['disabled', 'disabledAt', 'disabledBy'])
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['disabled', 'disabledAt', 'disabledBy', 'disabledReason'])
           && (!('disabled' in request.resource.data) || request.resource.data.disabled is bool)
+          && (!('disabledReason' in request.resource.data) || request.resource.data.disabledReason is string)
+        )
+        // 具編輯權限的管理員：只能改名稱、幣別、匯率、背景；成員／權限／擁有者仍只有統籌人能改。
+        // 故意不要求 tripActive，讓管理員能在行程停用期間清理內容。
+        || (
+          isAdminEditor()
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['name', 'currencies', 'fxRates', 'backgroundImageUrl', 'backgroundDim'])
+          && request.resource.data.name is string
+          && request.resource.data.name.size() > 0
+          && request.resource.data.name.size() <= 200
         );
       allow delete: if false;
 
       match /days/{dayId} {
         allow read: if canReadContent(tripId);
-        allow create, update, delete: if signedIn() && canEdit(tripId) && tripActive(tripId);
+        allow create, update: if signedIn() && canEdit(tripId) && tripActive(tripId) && validContentDoc(request.resource.data);
+        allow delete: if signedIn() && canEdit(tripId) && tripActive(tripId);
+        allow create, update: if isAdminEditor() && validContentDoc(request.resource.data);
+        allow delete: if isAdminEditor();
 
         match /spots/{spotId} {
           allow read: if canReadContent(tripId);
-          allow create, update, delete: if signedIn() && canEdit(tripId) && tripActive(tripId);
+          allow create, update: if signedIn() && canEdit(tripId) && tripActive(tripId) && validContentDoc(request.resource.data);
+          allow delete: if signedIn() && canEdit(tripId) && tripActive(tripId);
+          allow create, update: if isAdminEditor() && validContentDoc(request.resource.data);
+          allow delete: if isAdminEditor();
 
           // 許願池：已綁定成員（含唯讀）都可以留言，並且只能修改／刪除自己（authorUid）的留言；
           // 統籌人與編輯者維持原本權限（可管理所有留言、搬移景點時複製留言）。停用中的行程一律不可寫入。
           match /wishes/{wishId} {
             allow read: if canReadContent(tripId);
+            allow update, delete: if isAdminEditor();
             allow create: if tripActive(tripId)
               && (canEdit(tripId)
                 || (canReadContent(tripId)
@@ -201,6 +233,10 @@ service cloud.firestore {
 
       match /expenses/{expenseId} {
         allow read: if canReadContent(tripId);
+        allow update: if isAdminEditor()
+          && request.resource.data.get('createdByUid', null) == resource.data.get('createdByUid', null)
+          && validExpense(request.resource.data);
+        allow delete: if isAdminEditor();
 
         // 所有已綁定成員都可新增；建立者 UID 必須由目前登入者寫入。停用中的行程不可新增。
         allow create: if canReadContent(tripId)
@@ -275,6 +311,17 @@ service cloud.firestore {
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'createdAt']));
         allow delete: if false;
       }
+    }
+
+    // 管理員操作稽核紀錄：只有管理員能讀取與新增，且新增後不可修改或刪除。
+    match /adminAuditLogs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin()
+        && request.resource.data.adminUid == request.auth.uid
+        && request.resource.data.action is string
+        && request.resource.data.tripId is string
+        && request.resource.data.keys().hasOnly(['adminUid', 'adminEmail', 'tripId', 'action', 'detail', 'createdAt']);
+      allow update, delete: if false;
     }
 
     // 系統管理員名單：只能在 Firebase Console 手動新增/刪除文件（文件 ID = 管理員的 Google 登入 UID）。
