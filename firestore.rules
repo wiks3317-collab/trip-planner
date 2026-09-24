@@ -149,8 +149,35 @@ service cloud.firestore {
 
       match /expenses/{expenseId} {
         allow read: if canReadContent(tripId);
-        allow create: if canReadContent(tripId);
-        allow update, delete: if signedIn() && canEdit(tripId);
+
+        // 所有已綁定成員都可新增；建立者 UID 必須由目前登入者寫入。
+        allow create: if canReadContent(tripId)
+          && request.resource.data.createdByUid == request.auth.uid
+          && request.resource.data.title is string
+          && request.resource.data.amountCents is int
+          && request.resource.data.amountCents > 0
+          && request.resource.data.currency is string
+          && request.resource.data.payerId is string
+          && request.resource.data.splitWith is list
+          && request.resource.data.date is string;
+
+        // owner/editor 可管理全部；viewer 僅可修改自己建立的明細，且不得竄改建立者 UID。
+        allow update: if canEdit(tripId)
+          || (canReadContent(tripId)
+            && resource.data.get('createdByUid', null) == request.auth.uid
+            && request.resource.data.get('createdByUid', null) == resource.data.get('createdByUid', null)
+            && request.resource.data.title is string
+            && request.resource.data.amountCents is int
+            && request.resource.data.amountCents > 0
+            && request.resource.data.currency is string
+            && request.resource.data.payerId is string
+            && request.resource.data.splitWith is list
+            && request.resource.data.date is string);
+
+        // owner/editor 可刪除全部；viewer 僅可刪除自己建立的明細。
+        allow delete: if canEdit(tripId)
+          || (canReadContent(tripId)
+            && resource.data.get('createdByUid', null) == request.auth.uid);
       }
 
       // 邀請連結管理鏡像資料：只有統籌人可以查詢／列出自己行程的邀請連結清單，
