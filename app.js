@@ -570,7 +570,9 @@ async function approveAccessRequest(requestId, requestedUid, memberId) {
   const target = members.find((m) => m.id === memberId);
   if (!target) throw new Error("找不到要綁定的成員");
   if (target.permission === "owner") throw new Error("不能把申請者綁定到統籌人欄位");
-  target.uid = requestedUid;
+  const previousUid = target.uid || null;
+  target.uids = [...new Set([...(Array.isArray(target.uids) ? target.uids : []), ...(previousUid ? [previousUid] : []), requestedUid])];
+  target.uid = target.uids[0] || requestedUid;
   target.permission = "editor";
   await updateTripMembers(members);
   await updateDoc(doc(db, "trips", state.tripId, "accessRequests", requestId), {
@@ -1518,10 +1520,26 @@ function renderTripHome() {
       <button class="tab-btn ${state.tripSection === "itinerary" ? "active" : ""}" id="tab-itinerary">📅 行程</button>
       <button class="tab-btn ${state.tripSection === "expenses" ? "active" : ""}" id="tab-expenses">💰 記帳與分帳</button>
     </div>
+    <div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>目前裝置 UID：<code id="current-device-uid" style="word-break:break-all;">${escapeHtml(currentUid() || "尚未取得")}</code></span><button class="secondary-btn small-btn" id="copy-device-uid-btn">複製 UID</button></div>
     ${isLegacyTrip() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>這是舊版行程資料，目前尚未綁定新的身份權限。</span><button class="secondary-btn small-btn" id="claim-legacy-trip-btn">我是原統籌人，進行資料銜接</button></div>` : (!canEditItinerary() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>你目前是唯讀身份，可以瀏覽行程、許願池留言與記帳，但無法新增或編輯行程內容。</span><button class="secondary-btn small-btn" id="request-edit-access-btn">申請編輯權限</button></div>` : "")}
     <div id="day-selector-wrap"></div>
     <div id="day-content"></div>
   `;
+
+  const copyUidBtn = document.getElementById("copy-device-uid-btn");
+  if (copyUidBtn) {
+    copyUidBtn.onclick = async () => {
+      const uid = currentUid();
+      if (!uid) return toast("目前尚未取得 Firebase UID");
+      try {
+        await navigator.clipboard.writeText(uid);
+        toast("UID 已複製");
+      } catch (err) {
+        console.error(err);
+        toast("無法自動複製，請長按或手動選取 UID");
+      }
+    };
+  }
 
   const claimBtn = document.getElementById("claim-legacy-trip-btn");
   if (claimBtn) {
