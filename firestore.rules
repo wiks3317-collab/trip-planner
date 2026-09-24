@@ -116,12 +116,13 @@ service cloud.firestore {
             && resource.data.requestedUid == request.auth.uid
             && request.resource.data.requestedUid == resource.data.requestedUid
             && request.resource.data.status == resource.data.status)
-          // 申請遭拒絕後，原申請者可以重新送出；不得重設已核准的申請。
+          // 原申請者可將既有的 rejected／approved 申請重新送回 pending。
+          // 僅允許修改 status 與 createdAt，保留原有審核欄位，避免申請者竄改其他資料。
           || (signedIn()
             && requestId == request.auth.uid
             && resource.data.requestedUid == request.auth.uid
-            && resource.data.status == 'rejected'
-            && request.resource.data.requestedUid == request.auth.uid
+            && (resource.data.status == 'rejected' || resource.data.status == 'approved')
+            && request.resource.data.requestedUid == resource.data.requestedUid
             && request.resource.data.status == 'pending'
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'createdAt']));
         allow delete: if false;
