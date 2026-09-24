@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<!-- 不讓搜尋引擎收錄本站（Google、Bing 等都會遵守） -->
+<meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />
+<meta name="googlebot" content="noindex, nofollow, noarchive, nosnippet" />
 <title>旅行行程規劃工具</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>%F0%9F%8F%96%EF%B8%8F</text></svg>" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -38,8 +41,9 @@
     <ul id="trip-list"></ul>
     <button id="new-trip-btn" class="primary-btn full-width">＋ 建立新行程</button>
     <div class="menu-footer">
-      <button id="join-trip-btn" class="secondary-btn full-width">用連結／代碼加入行程</button>
+      <button id="join-trip-btn" class="secondary-btn full-width">用邀請連結加入行程</button>
       <button id="sync-devices-btn" class="secondary-btn full-width" style="margin-top:8px;">🔄 跨裝置同步清單</button>
+      <button id="show-uid-btn" class="secondary-btn full-width" style="margin-top:8px;">🪪 顯示目前裝置 UID</button>
     </div>
   </aside>
 
