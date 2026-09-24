@@ -135,7 +135,7 @@ service cloud.firestore {
       // 行程分享代碼只能由該行程統籌人建立；同步清單代碼則由已登入使用者建立。
       allow create: if signedIn()
         && (
-          (request.resource.data.type == 'trip'
+          (request.resource.data.type in ['trip', 'tripInvite']
             && request.resource.data.tripId is string
             && isOwner(request.resource.data.tripId))
           || request.resource.data.type == 'sync'
