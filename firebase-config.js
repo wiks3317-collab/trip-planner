@@ -1,7 +1,15 @@
 // ============================================================
-// Firebase 設定檔
-// 請依照 README.md 的教學，建立你自己的 Firebase 專案後，
-// 把下面的設定值換成你自己的（在 Firebase 主控台 > 專案設定 > 你的應用程式 可以找到）
+// 管理員後台專用 Firebase 設定檔（admin.html 專用）
+//
+// 這份檔案跟 firebase-config.js 是分開的、各自獨立初始化：
+// - firebase-config.js／app.js：一般使用者頁面，用「匿名登入」。
+// - admin-firebase-config.js／admin.js：管理員後台，用「Google 登入」。
+// 兩者互不影響：一般使用者完全不會載入這份檔案，這份檔案也不會
+// 動到 app.js 既有的任何邏輯。
+//
+// ⚠️ 请把下面 firebaseConfig 換成跟 firebase-config.js 裡「完全相同」的
+// 那組設定值（同一個 Firebase 專案）。兩份檔案目前是各自獨立維護，
+// 如果之後在 Firebase 主控台建立了新的網頁應用程式設定，記得兩份都要更新。
 // ============================================================
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
@@ -10,34 +18,29 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 import {
   getAuth,
-  signInAnonymously,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut,
   onAuthStateChanged,
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
 
 import { firebaseConfig } from "./firebase-options.js"; // 設定值集中在 firebase-options.js
 
-const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
-const auth = getAuth(app);
+// 用不同的 app 名稱（"admin"）初始化，避免萬一同一個瀏覽器分頁裡
+// 同時載入到一般頁面邏輯時互相干擾（正常情況下 admin.html 與
+// index.html 是完全不同的頁面，不會同時存在，這只是多一層保險）。
+const adminApp = initializeApp(firebaseConfig, "admin");
+const db = getFirestore(adminApp);
+const auth = getAuth(adminApp);
+const googleProvider = new GoogleAuthProvider();
 
-// 匿名登入：讓每個瀏覽器有一個穩定的 uid，純技術用途，
-// 使用者完全不會看到登入畫面，也不需要輸入帳密。
-let authReadyResolve;
-export const authReady = new Promise((res) => (authReadyResolve = res));
+async function adminSignIn() {
+  const cred = await signInWithPopup(auth, googleProvider);
+  return cred.user;
+}
 
-// 注意：全新瀏覽器（例如無痕視窗）第一次載入時，onAuthStateChanged 會先回傳 user = null，
-// 這時匿名登入還沒完成。如果此時就讓網站開始讀取資料，Firestore 會因為「未登入」而拒絕，
-// 造成邀請連結被誤判為失效。所以只有在真的拿到 user 之後，才算 authReady。
-onAuthStateChanged(auth, (user) => {
-  if (user) authReadyResolve(user);
-});
+async function adminSignOut() {
+  await signOut(auth);
+}
 
-signInAnonymously(auth)
-  .then((cred) => authReadyResolve(cred.user))
-  .catch((err) => {
-    console.error("匿名登入失敗", err);
-    authReadyResolve(null);
-  });
-
-window.__FIREBASE__ = { app, db, auth };
-export { app, db, auth };
+export { adminApp, db, auth, googleProvider, adminSignIn, adminSignOut, onAuthStateChanged };
