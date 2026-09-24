@@ -313,6 +313,10 @@ function canEditItinerary() {
 function isOwner() {
   return myPermission() === "owner";
 }
+// 是否已綁定此行程的成員身份（UID 對應到成員）。未綁定者看不到天數／景點／記帳內容。
+function canViewContent() {
+  return !!myMember();
+}
 
 // ------------------------------------------------------------
 // Modal 系統
@@ -437,8 +441,14 @@ async function route() {
   updateHeader();
   renderTripMenu();
 
-  // 新版不再讓使用者自行選擇成員身份；未綁定 UID 的使用者視為唯讀訪客。
-  // 後續將透過邀請／認領流程正式綁定成員 UID。
+  // 未綁定成員 UID 的訪客：不訂閱、不顯示任何天數／景點／記帳內容，只顯示申請畫面。
+  if (!canViewContent()) {
+    stopContentSubscriptions();
+    hideSpotPanel();
+    renderAccessGate();
+    return;
+  }
+  ensureContentSubscriptions();
 
   if (state.tripSection === "expenses") {
     hideSpotPanel();
@@ -454,6 +464,19 @@ async function route() {
   }
 }
 
+
+function ensureContentSubscriptions() {
+  if (!state.unsub.days) subscribeDays();
+}
+function stopContentSubscriptions() {
+  ["days", "spots", "spot", "wishes", "expenses"].forEach(clearUnsub);
+  spotsSubscribedDay = null;
+  state.days = [];
+  state.spots = [];
+  state.expenses = [];
+  state.wishes = [];
+  state.currentSpot = null;
+}
 
 async function resolveTripShortCode(code) {
   renderLoading();
@@ -506,8 +529,7 @@ async function loadTrip(tripId) {
     // 若目前畫面跟成員/權限有關，重新渲染目前頁面
     route();
   });
-
-  subscribeDays();
+  // 天數等內容的訂閱改由 route() 依「是否已綁定成員身份」決定
 }
 
 async function createTrip(name, members) {
@@ -988,19 +1010,6 @@ document.getElementById("share-btn").addEventListener("click", () => {
   renderShareTripModal();
 });
 
-async function ensureTripShareCode() {
-  if (state.trip && state.trip.shareCode) return { code: state.trip.shareCode, error: null };
-  const result = await createShortlink({ type: "trip", tripId: state.tripId });
-  if (!result.code) return result;
-  try {
-    await updateDoc(doc(db, "trips", state.tripId), { shareCode: result.code });
-  } catch (err) {
-    console.error("[shortlinks] 寫回行程的 shareCode 失敗", err);
-    // 就算存回行程資料失敗，這組代碼本身仍然有效，仍可繼續使用
-  }
-  return result;
-}
-
 // ------------------------------------------------------------
 // 邀請連結（可設定到期時間、可撤銷，多組並存）
 // 對照表存兩份：shortlinks/{code} 是給任何人用代碼查詢用的公開解析表（不可列出所有代碼）；
@@ -1095,60 +1104,81 @@ function toDatetimeLocalValue(timestamp) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+function inviteUrlOf(code) {
+  return `${window.location.origin}${window.location.pathname}#/s/${code}`;
+}
+
+// 分享行程：只保留「邀請連結」這一種分享方式
 async function renderShareTripModal() {
-  openModal("分享此行程", `<p style="color:var(--text-muted);">正在產生短連結...</p>`);
-  const { code, error } = await ensureTripShareCode();
-  if (!code) {
+  if (!isOwner()) {
     openModal("分享此行程", `
-      <p style="color:var(--danger);">${shortlinkErrorMessage(error)}</p>
+      <p style="font-size:13px;color:var(--text-muted);margin-top:0;">邀請連結由統籌人建立與管理。若想邀請其他人加入，請聯絡統籌人取得邀請連結。</p>
+      <div class="form-actions"><button class="primary-btn" id="share-close-btn">關閉</button></div>
+    `);
+    document.getElementById("share-close-btn").onclick = closeModal;
+    return;
+  }
+
+  openModal("分享此行程", `<p style="color:var(--text-muted);">正在讀取邀請連結...</p>`);
+  const links = await loadInviteLinks();
+  if (links === null) {
+    openModal("分享此行程", `
+      <p style="color:var(--danger);">邀請連結載入失敗，請確認 Firestore Rules 是否已更新（inviteLinks 集合）。</p>
       <div class="form-actions"><button class="secondary-btn" id="share-close-btn">關閉</button></div>
     `);
     document.getElementById("share-close-btn").onclick = closeModal;
     return;
   }
-  const link = `${window.location.origin}${window.location.pathname}#/s/${code}`;
+  const active = links.filter((l) => inviteLinkStatus(l) === "active");
 
   openModal("分享此行程", `
-    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">把下面的短連結或代碼傳給同行的人，他們打開連結，或在左側選單「用連結／代碼加入行程」貼上代碼，都能加入這個行程。</p>
-    <div class="form-row">
-      <label>短連結</label>
-      <input type="text" id="share-link-input" readonly value="${escapeHtml(link)}" onclick="this.select()">
-    </div>
-    <button class="secondary-btn full-width" id="copy-share-link-btn">📋 複製連結</button>
-
-    <div class="form-row" style="margin-top:14px;">
-      <label>行程代碼</label>
-      <input type="text" id="share-code-input" readonly value="${escapeHtml(code)}" onclick="this.select()" style="font-size:20px;letter-spacing:3px;text-align:center;font-weight:700;">
-    </div>
-    <button class="secondary-btn full-width" id="copy-share-code-btn">📋 複製代碼</button>
-
-    <div class="readonly-banner" style="margin-top:14px;">
-      <strong>邀請連結（開啟後可申請編輯權限）</strong>
-      <p style="font-size:13px;color:var(--text-muted);margin:6px 0 10px;">對方透過此連結進入後，仍然是唯讀身份；如需編輯，必須按「申請編輯權限」由統籌人核准。可以設定到期時間、隨時撤銷，並支援同時存在多組。</p>
-      ${isOwner()
-        ? `<button class="secondary-btn full-width" id="goto-invite-manage-btn">🔗 建立／管理邀請連結</button>`
-        : `<p style="font-size:12px;color:var(--text-muted);">只有統籌人可以建立邀請連結。</p>`}
-    </div>
-
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">把邀請連結傳給同行的人。對方打開後需先申請加入，經你核准並綁定成員身份後，才能看到行程內容。</p>
+    ${active.length ? active.map((l) => {
+      const url = inviteUrlOf(l.id);
+      const expiry = l.expiresAt ? `到期：${toDatetimeLocalValue(l.expiresAt).replace("T", " ")}` : "永久有效";
+      return `
+        <div class="invite-link-card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+            <strong style="font-size:13px;">${escapeHtml(l.label || "（未命名連結）")}</strong>
+            <span style="font-size:12px;color:var(--text-muted);">${escapeHtml(expiry)}</span>
+          </div>
+          <input type="text" readonly value="${escapeHtml(url)}" onclick="this.select()" style="width:100%;margin-top:6px;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+          <button class="secondary-btn full-width copy-share-invite-btn" data-url="${escapeHtml(url)}" style="margin-top:8px;">📋 複製邀請連結</button>
+        </div>`;
+    }).join("") : `<p style="font-size:13px;color:var(--text-muted);">目前沒有可用的邀請連結，請先建立一組。</p>`}
+    <button class="primary-btn full-width" id="create-share-invite-btn" style="margin-top:10px;">＋ 建立新的邀請連結（永久有效）</button>
+    <button class="secondary-btn full-width" id="goto-invite-manage-btn" style="margin-top:8px;">⚙️ 設定到期時間／撤銷連結</button>
     <div class="form-actions">
-      ${navigator.share ? `<button class="secondary-btn" id="native-share-btn">📤 用系統分享</button>` : ""}
+      ${navigator.share && active.length ? `<button class="secondary-btn" id="native-share-btn">📤 用系統分享</button>` : ""}
       <button class="primary-btn" id="share-close-btn">完成</button>
     </div>
   `);
   document.getElementById("share-close-btn").onclick = closeModal;
-  document.getElementById("copy-share-link-btn").addEventListener("click", () => copyText(link, "連結已複製"));
-  document.getElementById("copy-share-code-btn").addEventListener("click", () => copyText(code, "代碼已複製"));
-  const gotoInviteBtn = document.getElementById("goto-invite-manage-btn");
-  if (gotoInviteBtn) {
-    gotoInviteBtn.addEventListener("click", () => {
-      closeModal();
-      renderManageMembersModal();
-    });
-  }
+  document.querySelectorAll("#modal-box .copy-share-invite-btn").forEach((btn) => {
+    btn.addEventListener("click", () => copyText(btn.dataset.url, "邀請連結已複製"));
+  });
+  document.getElementById("create-share-invite-btn").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.textContent = "建立中...";
+    const result = await createTripInviteLink({});
+    if (!result.code) {
+      toast(shortlinkErrorMessage(result.error));
+      btn.disabled = false;
+      btn.textContent = "＋ 建立新的邀請連結（永久有效）";
+      return;
+    }
+    toast("已建立邀請連結");
+    renderShareTripModal();
+  });
+  document.getElementById("goto-invite-manage-btn").addEventListener("click", () => {
+    closeModal();
+    renderManageMembersModal();
+  });
   const nativeBtn = document.getElementById("native-share-btn");
   if (nativeBtn) {
     nativeBtn.addEventListener("click", () => {
-      navigator.share({ title: state.trip?.name || "旅行行程", url: link }).catch(() => {});
+      navigator.share({ title: state.trip?.name || "旅行行程", url: inviteUrlOf(active[0].id) }).catch(() => {});
     });
   }
 }
@@ -1297,11 +1327,34 @@ document.getElementById("new-trip-btn").addEventListener("click", () => {
   closeMenu();
   renderNewTripModal();
 });
+document.getElementById("show-uid-btn").addEventListener("click", () => {
+  closeMenu();
+  const uid = currentUid();
+  if (!uid) return toast("目前尚未取得 Firebase UID");
+  openModal("目前裝置 UID", `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">這是這台裝置／瀏覽器的匿名識別碼。若統籌人需要手動幫你綁定成員身份，把下面這串傳給統籌人即可。</p>
+    <div class="form-row"><input type="text" id="device-uid-input" readonly value="${escapeHtml(uid)}" onclick="this.select()"></div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="uid-close-btn">關閉</button>
+      <button class="primary-btn" id="uid-copy-btn">複製 UID</button>
+    </div>
+  `);
+  document.getElementById("uid-close-btn").onclick = closeModal;
+  document.getElementById("uid-copy-btn").onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(uid);
+      toast("UID 已複製");
+    } catch (err) {
+      console.error(err);
+      toast("無法自動複製，請長按或手動選取 UID");
+    }
+  };
+});
 document.getElementById("join-trip-btn").addEventListener("click", () => {
   closeMenu();
-  openModal("用連結／代碼加入行程", `
+  openModal("用邀請連結加入行程", `
     <div class="form-row">
-      <label>貼上同行人傳給你的連結，或行程代碼</label>
+      <label>貼上統籌人傳給你的邀請連結</label>
       <input type="text" id="join-input" placeholder="https://.../#/s/K7XPQ2 或 K7XPQ2">
     </div>
     <div class="form-actions">
@@ -1329,14 +1382,8 @@ async function handleJoinInput(raw) {
   m = raw.match(/\/s\/([a-zA-Z0-9]+)/);
   const code = (m ? m[1] : raw).toUpperCase();
   if (code.length <= 8) {
-    renderLoading();
-    const data = await getShortlinkData(code);
-    if (data && data.type === "trip" && data.tripId) {
-      navigate(`#/trip/${data.tripId}`);
-      return;
-    }
-    toast("找不到這組代碼，請確認輸入正確，或改貼完整連結");
-    navigate("");
+    // 交給 resolveTripShortCode 處理：邀請連結（含到期／撤銷檢查）與舊版行程代碼都能解析
+    navigate(`#/s/${code}`);
     return;
   }
   // 長度看起來不像短代碼，當作行程 ID 直接嘗試
@@ -1649,6 +1696,60 @@ function permLabel(p) {
 }
 
 
+// 「我是原統籌人，進行資料銜接」按鈕的行為
+function attachClaimLegacyHandler(btn) {
+  if (!btn) return;
+  btn.onclick = async () => {
+    if (!confirm("請確認你是這個舊行程原本的統籌人。確認後，此行程會綁定目前瀏覽器的匿名身份。")) return;
+    try {
+      btn.disabled = true;
+      await claimLegacyTrip();
+    } catch (err) {
+      console.error(err);
+      toast("資料銜接失敗，請先確認 Firebase 規則仍允許舊資料遷移");
+      btn.disabled = false;
+    }
+  };
+}
+
+// 「申請編輯權限」按鈕的行為
+function attachRequestAccessHandler(btn) {
+  if (!btn) return;
+  btn.onclick = async () => {
+    try {
+      btn.disabled = true;
+      await createEditAccessRequest();
+    } catch (err) {
+      console.error(err);
+      toast("申請送出失敗，請確認 Firebase 規則已更新");
+    }
+    btn.disabled = false;
+  };
+}
+
+// ------------------------------------------------------------
+// 未綁定成員身份者看到的畫面（不顯示任何天數／景點／記帳內容）
+// ------------------------------------------------------------
+function renderAccessGate() {
+  const root = document.getElementById("app-root");
+  const legacy = isLegacyTrip();
+  root.innerHTML = `
+    <div class="card" style="text-align:center;padding:36px 20px;">
+      <h3 style="margin-top:0;">🔒 尚未綁定此行程的成員身份</h3>
+      ${legacy ? `
+        <p style="color:var(--text-muted);">這是舊版行程資料，尚未綁定新的身份權限。若你是原統籌人，請進行資料銜接。</p>
+        <button class="primary-btn" id="claim-legacy-trip-btn">我是原統籌人，進行資料銜接</button>
+      ` : `
+        <p style="color:var(--text-muted);">${state.openedViaInvite ? "你是透過邀請連結進入此行程。" : ""}行程內容僅限成員查看。請按下方按鈕向統籌人提出申請，核准後就能看到行程內容。</p>
+        <button class="primary-btn" id="request-edit-access-btn">申請加入此行程</button>
+        <p style="font-size:12px;color:var(--text-muted);margin-top:14px;">也可以在左側選單點「顯示目前裝置 UID」，把 UID 傳給統籌人，由統籌人手動幫你綁定。</p>
+      `}
+    </div>
+  `;
+  attachClaimLegacyHandler(document.getElementById("claim-legacy-trip-btn"));
+  attachRequestAccessHandler(document.getElementById("request-edit-access-btn"));
+}
+
 // ------------------------------------------------------------
 // 行程主頁（頂端 行程/記帳 分頁 + 天數 tabs + 當日內容）
 // ------------------------------------------------------------
@@ -1661,54 +1762,13 @@ function renderTripHome() {
       <button class="tab-btn ${state.tripSection === "itinerary" ? "active" : ""}" id="tab-itinerary">📅 行程</button>
       <button class="tab-btn ${state.tripSection === "expenses" ? "active" : ""}" id="tab-expenses">💰 記帳與分帳</button>
     </div>
-    <div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>目前裝置 UID：<code id="current-device-uid" style="word-break:break-all;">${escapeHtml(currentUid() || "尚未取得")}</code></span><button class="secondary-btn small-btn" id="copy-device-uid-btn">複製 UID</button></div>
-    ${state.openedViaInvite ? `<div class="readonly-banner"><strong>你是透過邀請連結進入此行程</strong><div style="font-size:13px;margin-top:4px;">目前仍為唯讀瀏覽；如需編輯，請按下方「申請編輯權限」，由統籌人審核。</div></div>` : ""}
     ${isLegacyTrip() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>這是舊版行程資料，目前尚未綁定新的身份權限。</span><button class="secondary-btn small-btn" id="claim-legacy-trip-btn">我是原統籌人，進行資料銜接</button></div>` : (!canEditItinerary() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>你目前是唯讀身份，可以瀏覽行程、許願池留言與記帳，但無法新增或編輯行程內容。</span><button class="secondary-btn small-btn" id="request-edit-access-btn">申請編輯權限</button></div>` : "")}
     <div id="day-selector-wrap"></div>
     <div id="day-content"></div>
   `;
 
-  const copyUidBtn = document.getElementById("copy-device-uid-btn");
-  if (copyUidBtn) {
-    copyUidBtn.onclick = async () => {
-      const uid = currentUid();
-      if (!uid) return toast("目前尚未取得 Firebase UID");
-      try {
-        await navigator.clipboard.writeText(uid);
-        toast("UID 已複製");
-      } catch (err) {
-        console.error(err);
-        toast("無法自動複製，請長按或手動選取 UID");
-      }
-    };
-  }
-
-  const claimBtn = document.getElementById("claim-legacy-trip-btn");
-  if (claimBtn) {
-    claimBtn.onclick = async () => {
-      if (!confirm("請確認你是這個舊行程原本的統籌人。確認後，此行程會綁定目前瀏覽器的匿名身份。")) return;
-      try {
-        claimBtn.disabled = true;
-        await claimLegacyTrip();
-      } catch (err) {
-        console.error(err);
-        toast("資料銜接失敗，請先確認 Firebase 規則仍允許舊資料遷移");
-      }
-    };
-  }
-  const requestBtn = document.getElementById("request-edit-access-btn");
-  if (requestBtn) {
-    requestBtn.onclick = async () => {
-      try {
-        requestBtn.disabled = true;
-        await createEditAccessRequest();
-      } catch (err) {
-        console.error(err);
-        toast("申請送出失敗，請確認 Firebase 規則已更新");
-        requestBtn.disabled = false;
-      }
-    };
-  }
+  attachClaimLegacyHandler(document.getElementById("claim-legacy-trip-btn"));
+  attachRequestAccessHandler(document.getElementById("request-edit-access-btn"));
 
   document.getElementById("tab-itinerary").onclick = () => navigate(`#/trip/${state.tripId}${state.currentDayId ? "/day/" + state.currentDayId : ""}`);
   document.getElementById("tab-expenses").onclick = () => navigate(`#/trip/${state.tripId}/expenses`);
