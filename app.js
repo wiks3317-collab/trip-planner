@@ -431,6 +431,15 @@ async function route() {
   updateHeader();
   renderTripMenu();
 
+  // 行程已被系統管理員停用：不論身份（含統籌人），一律不訂閱、不顯示內容，只顯示停用提示。
+  // 這只是畫面上的提示，真正擋下寫入的是 Firestore Rules（見 firestore.rules 的 tripActive）。
+  if (state.trip.disabled === true) {
+    stopContentSubscriptions();
+    hideSpotPanel();
+    renderTripDisabled();
+    return;
+  }
+
   // 未綁定成員 UID 的訪客：不訂閱、不顯示任何天數／景點／記帳內容，只顯示申請畫面。
   if (!canViewContent()) {
     stopContentSubscriptions();
@@ -1689,6 +1698,16 @@ function renderAccessGate() {
   `;
   attachClaimLegacyHandler(document.getElementById("claim-legacy-trip-btn"));
   attachRequestAccessHandler(document.getElementById("request-edit-access-btn"));
+}
+
+function renderTripDisabled() {
+  const root = document.getElementById("app-root");
+  root.innerHTML = `
+    <div class="card" style="text-align:center;padding:36px 20px;">
+      <h3 style="margin-top:0;">🚫 此行程已被系統管理員停用</h3>
+      <p style="color:var(--text-muted);">暫時無法檢視或編輯此行程的內容（包含統籌人）。如果你認為這是誤判，請聯絡系統管理員。</p>
+    </div>
+  `;
 }
 
 // ------------------------------------------------------------
