@@ -149,7 +149,8 @@ service cloud.firestore {
 
       match /expenses/{expenseId} {
         allow read: if canReadContent(tripId);
-        allow create, update, delete: if signedIn() && canEdit(tripId);
+        allow create: if canReadContent(tripId);
+        allow update, delete: if signedIn() && canEdit(tripId);
       }
 
       // 邀請連結管理鏡像資料：只有統籌人可以查詢／列出自己行程的邀請連結清單，
