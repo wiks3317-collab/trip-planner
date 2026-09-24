@@ -177,9 +177,20 @@ function currentUid() {
 }
 
 function memberUids(member) {
-  const values = Array.isArray(member?.uids) ? [...member.uids] : [];
+  let raw = member?.uids;
+  // 相容 Firebase Console 可能誤存成 JSON 字串的情況：
+  // "[\"uidA\",\"uidB\"]" -> ["uidA", "uidB"]
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      raw = Array.isArray(parsed) ? parsed : [raw];
+    } catch {
+      raw = raw.trim() ? [raw] : [];
+    }
+  }
+  const values = Array.isArray(raw) ? [...raw] : [];
   if (member?.uid && !values.includes(member.uid)) values.unshift(member.uid);
-  return [...new Set(values.filter(Boolean))];
+  return [...new Set(values.filter((uid) => typeof uid === "string" && uid.trim()))];
 }
 
 // ------------------------------------------------------------
@@ -284,7 +295,7 @@ function clearAllUnsub() {
 function myMember() {
   if (!state.trip || !currentUid()) return null;
   // 權限以 Firebase Authentication 的 UID 綁定，不再採用前端自行選擇的 memberId。
-  return (state.trip.members || []).find((m) => m.uid === currentUid() || (Array.isArray(m.uids) && m.uids.includes(currentUid()))) || null;
+  return (state.trip.members || []).find((m) => memberUids(m).includes(currentUid())) || null;
 }
 function myPermission() {
   const m = myMember();
