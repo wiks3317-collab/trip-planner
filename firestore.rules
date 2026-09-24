@@ -31,6 +31,35 @@ service cloud.firestore {
       return isOwner(tripId) || role(tripId) == 'owner' || role(tripId) == 'editor';
     }
 
+    function validPermission(value) {
+      return value == 'owner' || value == 'editor' || value == 'viewer';
+    }
+
+    function validMembers(data) {
+      return data is list && data.size() > 0 && data.size() <= 100;
+    }
+
+    function validTripBase(data) {
+      return data.name is string
+        && data.name.size() > 0
+        && data.name.size() <= 200
+        && data.members is list
+        && data.members.size() > 0
+        && data.members.size() <= 100
+        && data.access is map
+        && data.authModelVersion == 2
+        && data.ownerUid is string;
+    }
+
+    function validInvite(data, tripId) {
+      return data.type == 'tripInvite'
+        && data.tripId == tripId
+        && data.createdBy is string
+        && data.revoked is bool
+        && (!('maxUses' in data) || data.maxUses == null || (data.maxUses is int && data.maxUses > 0 && data.maxUses <= 10000))
+        && (!('usedCount' in data) || (data.usedCount is int && data.usedCount >= 0));
+    }
+
     function protectedTripFieldsUnchanged(tripId) {
       return request.resource.data.ownerUid == resource.data.ownerUid
         && request.resource.data.authModelVersion == resource.data.authModelVersion;
@@ -58,9 +87,9 @@ service cloud.firestore {
     match /trips/{tripId} {
       allow create: if signedIn()
         && request.resource.data.ownerUid == request.auth.uid
-        && request.resource.data.access[request.auth.uid] == 'owner'
         && request.resource.data.name is string
-        && request.resource.data.members is list;
+        && validTripBase(request.resource.data)
+        && request.resource.data.access[request.auth.uid] == 'owner';
 
       // 過渡期：舊行程仍可被登入使用者讀取，讓既有資料不會因更新規則而立即失聯。
       allow get: if signedIn() && canReadTrip(tripId);
@@ -71,6 +100,7 @@ service cloud.firestore {
       allow update: if (
           isOwner(tripId)
           && protectedTripFieldsUnchanged(tripId)
+          && validTripBase(request.resource.data)
         )
         || (
           signedIn()
@@ -130,14 +160,16 @@ service cloud.firestore {
         allow create: if isOwner(tripId)
           && request.resource.data.type == 'tripInvite'
           && request.resource.data.tripId == tripId
-          && request.resource.data.revoked == false;
+          && request.resource.data.revoked == false
+          && validInvite(request.resource.data, tripId);
         // 只能調整 revoked／expiresAt／label／updatedAt，其餘欄位（含建立者、建立時間、所屬行程）不可被竄改。
         allow update: if isOwner(tripId)
           && request.resource.data.type == resource.data.type
           && request.resource.data.tripId == resource.data.tripId
           && request.resource.data.createdAt == resource.data.createdAt
           && request.resource.data.createdBy == resource.data.createdBy
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revoked', 'expiresAt', 'label', 'updatedAt']);
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revoked', 'expiresAt', 'label', 'updatedAt'])
+          && validInvite(request.resource.data, tripId);
         allow delete: if false;
       }
 
@@ -151,7 +183,13 @@ service cloud.firestore {
           && (isOwner(tripId)
             || requestId == request.auth.uid);
         allow list: if isOwner(tripId);
-        allow update: if isOwner(tripId)
+        allow update: if (
+            isOwner(tripId)
+            && request.resource.data.requestedUid == resource.data.requestedUid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'status', 'approvedMemberId', 'approvedAt', 'rejectedAt', 'updatedAt'
+            ])
+          )
           // 原申請者可將既有的 rejected／approved 申請重新送回 pending。
           // 僅允許修改 status 與 createdAt，保留原有審核欄位，避免申請者竄改其他資料。
           || (signedIn()
@@ -173,7 +211,8 @@ service cloud.firestore {
         && (
           (request.resource.data.type == 'tripInvite'
             && request.resource.data.tripId is string
-            && isOwner(request.resource.data.tripId))
+            && isOwner(request.resource.data.tripId)
+            && validInvite(request.resource.data, request.resource.data.tripId))
           || request.resource.data.type == 'sync'
         );
       // 邀請連結（tripInvite）可由該行程統籌人調整到期時間／撤銷或恢復啟用；
@@ -185,7 +224,8 @@ service cloud.firestore {
         && request.resource.data.tripId == resource.data.tripId
         && request.resource.data.createdAt == resource.data.createdAt
         && request.resource.data.createdBy == resource.data.createdBy
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revoked', 'expiresAt', 'label', 'updatedAt']);
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revoked', 'expiresAt', 'label', 'updatedAt'])
+        && validInvite(request.resource.data, resource.data.tripId);
       allow delete: if false;
     }
   }
