@@ -986,6 +986,10 @@ async function createTripInviteLink({ label, expiresAt } = {}) {
       createdBy: uid,
       expiresAt: expiresAt ? Timestamp.fromDate(expiresAt) : null,
       revoked: false,
+      // 目前邀請連結採「可重複開啟、由統籌人撤銷」模式；
+      // maxUses/usedCount 預留給後端原子兌換流程，前端不自行遞增使用次數。
+      maxUses: null,
+      usedCount: 0,
     };
     try {
       const batch = writeBatch(db);
@@ -1354,9 +1358,12 @@ async function handleJoinInput(raw) {
 // 但無法列出所有代碼、也無法竄改或刪除已存在的代碼（見 README 的安全規則）。
 // ------------------------------------------------------------
 const SHORT_CODE_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"; // 排除容易看錯的 0/O/1/I/L
-function genShortCode(len = 6) {
+function genShortCode(len = 12) {
+  // 使用 Web Crypto 產生不可預測的隨機索引，避免 Math.random() 可預測。
+  const values = new Uint32Array(len);
+  crypto.getRandomValues(values);
   let s = "";
-  for (let i = 0; i < len; i++) s += SHORT_CODE_CHARS[Math.floor(Math.random() * SHORT_CODE_CHARS.length)];
+  for (let i = 0; i < len; i++) s += SHORT_CODE_CHARS[values[i] % SHORT_CODE_CHARS.length];
   return s;
 }
 async function createShortlink(data, attempts = 6) {
