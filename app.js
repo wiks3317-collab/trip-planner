@@ -567,11 +567,19 @@ async function createEditAccessRequest() {
     }
   }
 
-  await setDoc(requestRef, {
-    requestedUid: uid,
-    status: "pending",
-    createdAt: serverTimestamp(),
-  });
+  if (existing.exists()) {
+    // 既有申請只更新必要欄位，避免 setDoc 覆寫並刪除歷史審核欄位。
+    await updateDoc(requestRef, {
+      status: "pending",
+      createdAt: serverTimestamp(),
+    });
+  } else {
+    await setDoc(requestRef, {
+      requestedUid: uid,
+      status: "pending",
+      createdAt: serverTimestamp(),
+    });
+  }
   toast("已送出編輯權限申請，請通知統籌人審核");
 }
 
