@@ -14,17 +14,7 @@ import {
   onAuthStateChanged,
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
 
-// ⬇⬇⬇ 把這裡換成你自己 Firebase 專案的設定 ⬇⬇⬇
-const firebaseConfig = {
-  apiKey: "AIzaSyBVxVdsmkpKATI81D_uiJdIk9bp5lhngdk",
-  authDomain: "my-trip-planner-d1b84.firebaseapp.com",
-  projectId: "my-trip-planner-d1b84",
-  storageBucket: "my-trip-planner-d1b84.firebasestorage.app",
-  messagingSenderId: "1098126379589",
-  appId: "1:1098126379589:web:69cc751290a9374011b12c",
-  measurementId: "G-0K01H21D23"
-};
-// ⬆⬆⬆ 把這裡換成你自己 Firebase 專案的設定 ⬆⬆⬆
+import { firebaseConfig } from "./firebase-options.js"; // 設定值集中在 firebase-options.js
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
