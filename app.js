@@ -6,7 +6,7 @@
 import { db, auth, authReady } from "./firebase-config.js";
 import {
   collection, doc, getDoc, getDocs, setDoc, addDoc, updateDoc, deleteDoc,
-  onSnapshot, query, orderBy, serverTimestamp, writeBatch,
+  onSnapshot, query, orderBy, serverTimestamp, writeBatch, Timestamp,
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 
 // ------------------------------------------------------------
@@ -463,6 +463,12 @@ async function resolveTripShortCode(code) {
     navigate("");
     return;
   }
+  if (data.type === "tripInvite" && !isInviteLinkValid(data)) {
+    const status = inviteLinkStatus(data);
+    toast(status === "revoked" ? "這組邀請連結已被統籌人撤銷，請索取新的邀請連結" : "這組邀請連結已過期，請索取新的邀請連結");
+    navigate("");
+    return;
+  }
   state.openedViaInvite = data.type === "tripInvite";
   navigate(`#/trip/${data.tripId}`);
 }
@@ -630,9 +636,10 @@ async function claimLegacyTrip() {
     ...m,
     uid: i === ownerIndex ? uid : (m.uid || null),
   }));
+  const normalizedMembers = members.map((m) => ({ ...m, uids: memberUids(m) }));
   const access = {};
   normalizedMembers.forEach((m) => {
-    memberUids(m).forEach((uid) => { if (uid) access[uid] = m.permission; });
+    memberUids(m).forEach((mUid) => { if (mUid) access[mUid] = m.permission; });
   });
   await updateDoc(doc(db, "trips", state.tripId), {
     members: normalizedMembers,
@@ -994,16 +1001,98 @@ async function ensureTripShareCode() {
   return result;
 }
 
-async function ensureTripInviteCode() {
-  if (state.trip && state.trip.inviteCode) return { code: state.trip.inviteCode, error: null };
-  const result = await createShortlink({ type: "tripInvite", tripId: state.tripId });
-  if (!result.code) return result;
-  try {
-    await updateDoc(doc(db, "trips", state.tripId), { inviteCode: result.code });
-  } catch (err) {
-    console.error("[shortlinks] 寫回行程的 inviteCode 失敗", err);
+// ------------------------------------------------------------
+// 邀請連結（可設定到期時間、可撤銷，多組並存）
+// 對照表存兩份：shortlinks/{code} 是給任何人用代碼查詢用的公開解析表（不可列出所有代碼）；
+// trips/{tripId}/inviteLinks/{code} 是給統籌人在「管理成員與權限」列出/管理自己行程邀請連結用的鏡像資料。
+// 兩份用同一組 code 當文件 ID，撤銷／改期限時會同時更新。
+// ------------------------------------------------------------
+async function createTripInviteLink({ label, expiresAt } = {}) {
+  const tripId = state.tripId;
+  const uid = currentUid();
+  for (let i = 0; i < 6; i++) {
+    const code = genShortCode();
+    const payload = {
+      type: "tripInvite",
+      tripId,
+      label: (label || "").trim() || null,
+      createdAt: serverTimestamp(),
+      createdBy: uid,
+      expiresAt: expiresAt ? Timestamp.fromDate(expiresAt) : null,
+      revoked: false,
+    };
+    try {
+      const batch = writeBatch(db);
+      batch.set(doc(db, "shortlinks", code), payload);
+      batch.set(doc(db, "trips", tripId, "inviteLinks", code), payload);
+      await batch.commit();
+      return { code, error: null };
+    } catch (err) {
+      console.error("[inviteLinks] 建立邀請連結失敗", err);
+      if (err && err.code === "permission-denied") {
+        return { code: null, error: "permission-denied" };
+      }
+      // 其他錯誤（極少見的代碼剛好撞號）重新抽一組再試
+    }
   }
-  return result;
+  return { code: null, error: "unknown" };
+}
+
+async function loadInviteLinks() {
+  if (!state.tripId) return [];
+  try {
+    const q = query(collection(db, "trips", state.tripId, "inviteLinks"), orderBy("createdAt", "desc"));
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  } catch (err) {
+    console.error("[inviteLinks] 讀取邀請連結清單失敗", err);
+    return null; // 讀取失敗（例如規則尚未更新）與「沒有任何連結」區分開來
+  }
+}
+
+async function setInviteLinkRevoked(code, revoked) {
+  const batch = writeBatch(db);
+  batch.update(doc(db, "shortlinks", code), { revoked });
+  batch.update(doc(db, "trips", state.tripId, "inviteLinks", code), { revoked });
+  await batch.commit();
+}
+
+async function setInviteLinkExpiry(code, expiresAtDateOrNull) {
+  const value = expiresAtDateOrNull ? Timestamp.fromDate(expiresAtDateOrNull) : null;
+  const batch = writeBatch(db);
+  batch.update(doc(db, "shortlinks", code), { expiresAt: value });
+  batch.update(doc(db, "trips", state.tripId, "inviteLinks", code), { expiresAt: value });
+  await batch.commit();
+}
+
+function inviteLinkStatus(link) {
+  if (link.revoked) return "revoked";
+  if (link.expiresAt) {
+    const ms = link.expiresAt.toMillis ? link.expiresAt.toMillis() : new Date(link.expiresAt).getTime();
+    if (ms <= Date.now()) return "expired";
+  }
+  return "active";
+}
+function isInviteLinkValid(data) {
+  return inviteLinkStatus(data) === "active";
+}
+function inviteLinkStatusLabel(status) {
+  if (status === "revoked") return "已撤銷";
+  if (status === "expired") return "已過期";
+  return "使用中";
+}
+// datetime-local <input> 的值（本地時間，無時區）轉成 Date 物件
+function parseDatetimeLocal(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? null : d;
+}
+// Firestore Timestamp -> 填回 <input type=datetime-local> 需要的字串（本地時間）
+function toDatetimeLocalValue(timestamp) {
+  if (!timestamp) return "";
+  const d = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 async function renderShareTripModal() {
@@ -1035,9 +1124,10 @@ async function renderShareTripModal() {
 
     <div class="readonly-banner" style="margin-top:14px;">
       <strong>邀請連結（開啟後可申請編輯權限）</strong>
-      <p style="font-size:13px;color:var(--text-muted);margin:6px 0 10px;">對方透過此連結進入後，仍然是唯讀身份；如需編輯，必須按「申請編輯權限」由統籌人核准。</p>
-      <button class="secondary-btn full-width" id="create-invite-link-btn">產生邀請連結</button>
-      <div id="invite-link-result" style="margin-top:8px;"></div>
+      <p style="font-size:13px;color:var(--text-muted);margin:6px 0 10px;">對方透過此連結進入後，仍然是唯讀身份；如需編輯，必須按「申請編輯權限」由統籌人核准。可以設定到期時間、隨時撤銷，並支援同時存在多組。</p>
+      ${isOwner()
+        ? `<button class="secondary-btn full-width" id="goto-invite-manage-btn">🔗 建立／管理邀請連結</button>`
+        : `<p style="font-size:12px;color:var(--text-muted);">只有統籌人可以建立邀請連結。</p>`}
     </div>
 
     <div class="form-actions">
@@ -1048,29 +1138,13 @@ async function renderShareTripModal() {
   document.getElementById("share-close-btn").onclick = closeModal;
   document.getElementById("copy-share-link-btn").addEventListener("click", () => copyText(link, "連結已複製"));
   document.getElementById("copy-share-code-btn").addEventListener("click", () => copyText(code, "代碼已複製"));
-  document.getElementById("copy-share-code-btn").addEventListener("click", () => copyText(code, "代碼已複製"));
-  document.getElementById("create-invite-link-btn").addEventListener("click", async () => {
-    const btn = document.getElementById("create-invite-link-btn");
-    const resultEl = document.getElementById("invite-link-result");
-    btn.disabled = true;
-    btn.textContent = "產生中...";
-    try {
-      const invite = await ensureTripInviteCode();
-      if (!invite.code) {
-        resultEl.innerHTML = `<p style="color:var(--danger);">${shortlinkErrorMessage(invite.error)}</p>`;
-      } else {
-        const inviteLink = `${window.location.origin}${window.location.pathname}#/s/${invite.code}`;
-        resultEl.innerHTML = `<input type="text" readonly value="${escapeHtml(inviteLink)}" onclick="this.select()" style="width:100%;"><button class="secondary-btn full-width" id="copy-invite-link-btn" style="margin-top:6px;">📋 複製邀請連結</button>`;
-        document.getElementById("copy-invite-link-btn").onclick = () => copyText(inviteLink, "邀請連結已複製");
-      }
-    } catch (err) {
-      console.error(err);
-      resultEl.innerHTML = `<p style="color:var(--danger);">邀請連結產生失敗，請確認 Firebase 規則已更新。</p>`;
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "重新產生／顯示邀請連結";
-    }
-  });
+  const gotoInviteBtn = document.getElementById("goto-invite-manage-btn");
+  if (gotoInviteBtn) {
+    gotoInviteBtn.addEventListener("click", () => {
+      closeModal();
+      renderManageMembersModal();
+    });
+  }
   const nativeBtn = document.getElementById("native-share-btn");
   if (nativeBtn) {
     nativeBtn.addEventListener("click", () => {
@@ -2830,8 +2904,35 @@ function renderManageMembersModal() {
     return;
   }
   let members = state.trip.members.map((m) => ({ ...m, uids: memberUids(m) }));
+  const expandedUidPanels = new Set(); // 記住目前展開了哪些成員的「裝置(UID)管理」面板，避免每次 renderRows() 都收合
+
+  // 保持舊版單一 uid 欄位與新版 uids 陣列同步，避免移除 UID 後又被 memberUids() 補回來
+  function syncMemberUid(m) {
+    m.uid = m.uids[0] || null;
+  }
+
+  function uidPanelBodyHtml(m) {
+    const uids = m.uids;
+    return `
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">同一個人用不同裝置／瀏覽器登入時，可以把每台裝置的 UID 都加進來，讓它們共用同一位成員的權限。核准「編輯權限申請」時也會自動加進來。</div>
+      ${uids.length ? uids.map((uid) => {
+        const isProtectedOwnerUid = uid === state.trip.ownerUid;
+        return `
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+          <code style="flex:1;font-size:11px;word-break:break-all;">${escapeHtml(uid)}</code>
+          ${isProtectedOwnerUid
+            ? `<span class="status-tag" title="目前登入中的統籌人身份，無法在此移除">目前登入的統籌人</span>`
+            : `<button class="icon-btn remove-uid-btn" data-row="${m.id}" data-uid="${escapeHtml(uid)}" title="移除這台裝置">✕</button>`}
+        </div>`;
+      }).join("") : `<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">尚未綁定任何裝置（UID）。</div>`}
+      <div style="display:flex;gap:6px;margin-top:6px;">
+        <input type="text" placeholder="手動貼上要加入的 UID" data-add-uid-input="${m.id}" style="flex:1;padding:6px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;">
+        <button class="secondary-btn small-btn add-uid-btn" data-row="${m.id}">＋ 新增</button>
+      </div>`;
+  }
 
   function rowHtml(m) {
+    const uidCount = m.uids.length;
     return `
       <div class="block-editor-row" data-row="${m.id}">
         <input type="text" value="${escapeHtml(m.name)}" data-field="name" data-row="${m.id}" style="flex:1;min-width:100px;padding:8px;border:1px solid var(--border);border-radius:8px;">
@@ -2840,12 +2941,22 @@ function renderManageMembersModal() {
           <option value="editor" ${m.permission === "editor" ? "selected" : ""}>可編輯</option>
           <option value="viewer" ${m.permission === "viewer" ? "selected" : ""}>唯讀</option>
         </select>
+        <button class="icon-btn toggle-uid-btn" data-row="${m.id}" title="管理裝置（UID）">🔧${uidCount ? ` ${uidCount}` : ""}</button>
         <button class="icon-btn remove-member-row" data-row="${m.id}">✕</button>
+      </div>
+      <div class="member-uid-panel" data-uid-panel="${m.id}" style="display:none;">
+        ${uidPanelBodyHtml(m)}
       </div>`;
   }
   function renderRows() {
     const wrap = document.getElementById("manage-members-wrap");
     wrap.innerHTML = members.map(rowHtml).join("");
+    members.forEach((m) => {
+      if (!expandedUidPanels.has(m.id)) return;
+      const panel = wrap.querySelector(`[data-uid-panel="${m.id}"]`);
+      if (panel) panel.style.display = "block";
+    });
+
     wrap.querySelectorAll("input[data-field=name]").forEach((inp) => {
       inp.addEventListener("input", () => {
         members.find((x) => x.id === inp.dataset.row).name = inp.value;
@@ -2863,6 +2974,164 @@ function renderManageMembersModal() {
         renderRows();
       });
     });
+    wrap.querySelectorAll(".toggle-uid-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const id = btn.dataset.row;
+        if (expandedUidPanels.has(id)) expandedUidPanels.delete(id);
+        else expandedUidPanels.add(id);
+        renderRows();
+      });
+    });
+    wrap.querySelectorAll(".remove-uid-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const m = members.find((x) => x.id === btn.dataset.row);
+        if (!m) return;
+        m.uids = m.uids.filter((u) => u !== btn.dataset.uid);
+        syncMemberUid(m);
+        expandedUidPanels.add(m.id);
+        renderRows();
+      });
+    });
+    wrap.querySelectorAll(".add-uid-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const m = members.find((x) => x.id === btn.dataset.row);
+        const input = wrap.querySelector(`[data-add-uid-input="${btn.dataset.row}"]`);
+        const value = (input.value || "").trim();
+        if (!m || !value) return;
+        const ownedByOther = members.find((x) => x.id !== m.id && x.uids.includes(value));
+        if (ownedByOther) {
+          toast(`這個 UID 已經綁定在「${ownedByOther.name || "另一位成員"}」，請先從那邊移除`);
+          return;
+        }
+        if (!m.uids.includes(value)) m.uids.push(value);
+        syncMemberUid(m);
+        expandedUidPanels.add(m.id);
+        renderRows();
+        toast("已加入，記得按下方「儲存」才會生效");
+      });
+    });
+  }
+
+  async function renderInviteLinksList() {
+    const listWrap = document.getElementById("invite-links-list");
+    if (!listWrap) return;
+    listWrap.innerHTML = `<p style="color:var(--text-muted);font-size:13px;">載入中...</p>`;
+    const links = await loadInviteLinks();
+    if (links === null) {
+      listWrap.innerHTML = `<p style="color:var(--danger);font-size:13px;">邀請連結清單載入失敗，請確認 Firestore Rules 是否已加入 inviteLinks 的規則。</p>`;
+      return;
+    }
+    if (!links.length) {
+      listWrap.innerHTML = `<p style="color:var(--text-muted);font-size:13px;">目前沒有任何邀請連結。</p>`;
+      return;
+    }
+    listWrap.innerHTML = links.map((link) => {
+      const status = inviteLinkStatus(link);
+      const inviteUrl = `${window.location.origin}${window.location.pathname}#/s/${link.id}`;
+      return `
+        <div class="invite-link-card" data-invite-code="${link.id}">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+            <strong style="font-size:13px;">${escapeHtml(link.label || "（未命名連結）")}</strong>
+            <span class="status-tag status-${status}">${inviteLinkStatusLabel(status)}</span>
+          </div>
+          <input type="text" readonly value="${escapeHtml(inviteUrl)}" onclick="this.select()" style="width:100%;margin-top:6px;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px;">
+            <button class="secondary-btn small-btn copy-invite-btn" data-url="${escapeHtml(inviteUrl)}">📋 複製</button>
+            <input type="datetime-local" class="invite-expiry-input" data-code="${link.id}" value="${toDatetimeLocalValue(link.expiresAt)}" style="padding:6px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;" ${status === "revoked" ? "disabled" : ""}>
+            <button class="secondary-btn small-btn save-invite-expiry-btn" data-code="${link.id}" ${status === "revoked" ? "disabled" : ""}>更新到期時間</button>
+            ${status === "revoked"
+              ? `<button class="secondary-btn small-btn restore-invite-btn" data-code="${link.id}">恢復啟用</button>`
+              : `<button class="danger-btn small-btn revoke-invite-btn" data-code="${link.id}">撤銷</button>`}
+          </div>
+        </div>`;
+    }).join("");
+
+    listWrap.querySelectorAll(".copy-invite-btn").forEach((btn) => {
+      btn.addEventListener("click", () => copyText(btn.dataset.url, "邀請連結已複製"));
+    });
+    listWrap.querySelectorAll(".save-invite-expiry-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const input = listWrap.querySelector(`.invite-expiry-input[data-code="${btn.dataset.code}"]`);
+        const dateValue = parseDatetimeLocal(input.value);
+        btn.disabled = true;
+        try {
+          await setInviteLinkExpiry(btn.dataset.code, dateValue);
+          toast(dateValue ? "已更新到期時間" : "已設為永久有效");
+          await renderInviteLinksList();
+        } catch (err) {
+          console.error(err);
+          toast("更新失敗，請稍後再試");
+          btn.disabled = false;
+        }
+      });
+    });
+    listWrap.querySelectorAll(".revoke-invite-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("確定要撤銷這組邀請連結嗎？撤銷後這個連結將無法再使用。")) return;
+        btn.disabled = true;
+        try {
+          await setInviteLinkRevoked(btn.dataset.code, true);
+          toast("已撤銷邀請連結");
+          await renderInviteLinksList();
+        } catch (err) {
+          console.error(err);
+          toast("撤銷失敗，請稍後再試");
+          btn.disabled = false;
+        }
+      });
+    });
+    listWrap.querySelectorAll(".restore-invite-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          await setInviteLinkRevoked(btn.dataset.code, false);
+          toast("已恢復啟用");
+          await renderInviteLinksList();
+        } catch (err) {
+          console.error(err);
+          toast("恢復失敗，請稍後再試");
+          btn.disabled = false;
+        }
+      });
+    });
+  }
+
+  async function renderInviteLinksSection() {
+    const wrap = document.getElementById("invite-links-wrap");
+    wrap.innerHTML = `
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;">
+        <input type="text" id="new-invite-label" placeholder="連結用途（選填，例如：家族群組）" style="flex:1;min-width:140px;padding:8px;border:1px solid var(--border);border-radius:8px;font-size:13px;">
+        <input type="datetime-local" id="new-invite-expiry" style="padding:8px;border:1px solid var(--border);border-radius:8px;font-size:13px;">
+        <button class="primary-btn small-btn" id="create-invite-btn">＋ 建立邀請連結</button>
+      </div>
+      <p style="font-size:11px;color:var(--text-muted);margin:0 0 10px;">到期時間留空表示永久有效；建立後仍可隨時回來調整期限或撤銷，也可以同時建立多組（例如分別給不同群組）。</p>
+      <div id="invite-links-list"><p style="color:var(--text-muted);font-size:13px;">載入中...</p></div>
+    `;
+    document.getElementById("create-invite-btn").addEventListener("click", async () => {
+      const btn = document.getElementById("create-invite-btn");
+      const label = document.getElementById("new-invite-label").value;
+      const expiresAt = parseDatetimeLocal(document.getElementById("new-invite-expiry").value);
+      btn.disabled = true;
+      btn.textContent = "建立中...";
+      try {
+        const result = await createTripInviteLink({ label, expiresAt });
+        if (!result.code) {
+          toast(shortlinkErrorMessage(result.error));
+        } else {
+          toast("已建立邀請連結");
+          document.getElementById("new-invite-label").value = "";
+          document.getElementById("new-invite-expiry").value = "";
+          await renderInviteLinksList();
+        }
+      } catch (err) {
+        console.error(err);
+        toast("建立邀請連結失敗");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "＋ 建立邀請連結";
+      }
+    });
+    await renderInviteLinksList();
   }
 
   openModal("管理成員與權限", `
@@ -2871,6 +3140,10 @@ function renderManageMembersModal() {
     <div style="border-top:1px dashed var(--border);margin-top:16px;padding-top:12px;">
       <h4 style="margin:0 0 8px;">編輯權限申請</h4>
       <div id="access-requests-wrap"><p style="color:var(--text-muted);font-size:13px;">載入中...</p></div>
+    </div>
+    <div style="border-top:1px dashed var(--border);margin-top:16px;padding-top:12px;">
+      <h4 style="margin:0 0 8px;">邀請連結管理</h4>
+      <div id="invite-links-wrap"><p style="color:var(--text-muted);font-size:13px;">載入中...</p></div>
     </div>
     <p style="font-size:12px;color:var(--text-muted);margin-top:12px;">
       提醒：移除成員不會刪除他過去留下的許願池留言或消費紀錄，但他將無法再用原本的身份登入。
@@ -2881,6 +3154,7 @@ function renderManageMembersModal() {
     </div>
   `);
   renderRows();
+  renderInviteLinksSection();
   (async () => {
     const wrap = document.getElementById("access-requests-wrap");
     try {
@@ -2937,7 +3211,7 @@ function renderManageMembersModal() {
     }
   })();
   document.getElementById("manage-add-member-btn").addEventListener("click", () => {
-    members.push({ id: newLocalId(), name: "", permission: "editor" });
+    members.push({ id: newLocalId(), name: "", permission: "editor", uid: null, uids: [] });
     renderRows();
   });
   document.getElementById("manage-cancel").onclick = closeModal;
