@@ -901,9 +901,17 @@ function subscribeExpenses() {
   });
 }
 
+function canManageExpense(expense) {
+  if (canEditItinerary()) return true;
+  return !!expense && expense.createdByUid === currentUid();
+}
+
 async function addExpense({ title, amountCents, currency, payerId, splitWith, date, note }) {
+  const uid = currentUid();
+  if (!uid || !canViewContent()) throw new Error("未登入或尚未綁定行程成員");
   await addDoc(collection(db, "trips", state.tripId, "expenses"), {
     title, amountCents, currency, payerId, splitWith, date, note: note || "",
+    createdByUid: uid,
     createdAt: serverTimestamp(),
   });
 }
@@ -2553,7 +2561,7 @@ function renderExpensesPage() {
                   ${escapeHtml(memberName(e.payerId))} 先付款，由 ${e.splitWith.map(memberName).map(escapeHtml).join("、")} 分攤
                   ${e.note ? ` · ${escapeHtml(e.note)}` : ""}
                 </div>
-                ${canEditItinerary() ? `<div style="margin-top:6px;display:flex;gap:6px;">
+                ${canManageExpense(e) ? `<div style="margin-top:6px;display:flex;gap:6px;">
                   <span class="secondary-btn small-btn edit-expense-btn" data-id="${e.id}">編輯</span>
                   <span class="danger-btn small-btn del-expense-btn" data-id="${e.id}">刪除</span>
                 </div>` : ""}
@@ -2579,11 +2587,13 @@ function renderExpensesPage() {
   root.querySelectorAll(".edit-expense-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const expense = state.expenses.find((e) => e.id === btn.dataset.id);
-      if (expense) renderExpenseFormModal(expense);
+      if (expense && canManageExpense(expense)) renderExpenseFormModal(expense);
     });
   });
   root.querySelectorAll(".del-expense-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
+      const expense = state.expenses.find((e) => e.id === btn.dataset.id);
+      if (!expense || !canManageExpense(expense)) return toast("你只能管理自己新增的明細");
       openConfirm("確定要刪除這筆消費紀錄嗎？", async () => {
         await deleteExpense(btn.dataset.id);
       });
@@ -2690,6 +2700,10 @@ function renderManualFxModal(currencies) {
 }
 
 function renderExpenseFormModal(existing) {
+  if (existing && !canManageExpense(existing)) {
+    toast("你只能管理自己新增的明細");
+    return;
+  }
   const members = state.trip.members;
   const my = myMember();
   const currencies = tripCurrencies();
