@@ -2517,7 +2517,7 @@ function renderExpensesPage() {
     </div>
 
     <div class="section-title">消費明細</div>
-    <button class="primary-btn full-width" id="add-expense-btn" style="margin-bottom:12px;">＋ 新增一筆消費</button>
+    ${canViewContent() ? `<button class="primary-btn full-width" id="add-expense-btn" style="margin-bottom:12px;">＋ 新增一筆消費</button>` : ""}
     <div id="expense-list">
       ${dateKeys.length ? dateKeys.map((dk) => {
         const items = byDate[dk];
@@ -2553,10 +2553,10 @@ function renderExpensesPage() {
                   ${escapeHtml(memberName(e.payerId))} 先付款，由 ${e.splitWith.map(memberName).map(escapeHtml).join("、")} 分攤
                   ${e.note ? ` · ${escapeHtml(e.note)}` : ""}
                 </div>
-                <div style="margin-top:6px;display:flex;gap:6px;">
+                ${canEditItinerary() ? `<div style="margin-top:6px;display:flex;gap:6px;">
                   <span class="secondary-btn small-btn edit-expense-btn" data-id="${e.id}">編輯</span>
                   <span class="danger-btn small-btn del-expense-btn" data-id="${e.id}">刪除</span>
-                </div>
+                </div>` : ""}
               </div>
             `;
             }).join("")}
@@ -2568,7 +2568,8 @@ function renderExpensesPage() {
 
   document.getElementById("tab-itinerary").onclick = () => navigate(`#/trip/${state.tripId}${state.currentDayId ? "/day/" + state.currentDayId : ""}`);
   document.getElementById("tab-expenses").onclick = () => {};
-  document.getElementById("add-expense-btn").addEventListener("click", () => renderExpenseFormModal(null));
+  const addExpenseBtn = document.getElementById("add-expense-btn");
+  if (addExpenseBtn) addExpenseBtn.addEventListener("click", () => renderExpenseFormModal(null));
   document.getElementById("open-settlement-btn").addEventListener("click", () => renderSettlementModal(transactions));
   const refreshBtn = document.getElementById("refresh-fx-btn");
   if (refreshBtn) refreshBtn.addEventListener("click", () => handleRefreshRates(usedCurrencies));
@@ -3156,7 +3157,7 @@ function renderManageMembersModal() {
         wrap.innerHTML = `<p style="color:var(--text-muted);font-size:13px;">目前沒有待審核申請。</p>`;
         return;
       }
-      const candidates = members.filter((m) => m.permission !== "owner" && memberUids(m).length === 0);
+      const candidates = members.filter((m) => m.permission !== "owner");
       wrap.innerHTML = requests.map((r) => `
         <div class="card" style="padding:10px;margin-bottom:8px;">
           <div style="font-size:12px;word-break:break-all;">UID：${escapeHtml(r.requestedUid)}</div>
