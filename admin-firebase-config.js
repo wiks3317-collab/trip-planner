@@ -24,17 +24,7 @@ import {
   onAuthStateChanged,
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
 
-// ⬇⬇⬇ 換成跟 firebase-config.js 相同的設定 ⬇⬇⬇
-const firebaseConfig = {
-  apiKey: "AIzaSyBVxVdsmkpKATI81D_uiJdIk9bp5lhngdk",
-  authDomain: "my-trip-planner-d1b84.firebaseapp.com",
-  projectId: "my-trip-planner-d1b84",
-  storageBucket: "my-trip-planner-d1b84.firebasestorage.app",
-  messagingSenderId: "1098126379589",
-  appId: "1:1098126379589:web:69cc751290a9374011b12c",
-  measurementId: "G-0K01H21D23"
-};
-// ⬆⬆⬆ 換成跟 firebase-config.js 相同的設定 ⬆⬆⬆
+import { firebaseConfig } from "./firebase-options.js"; // 設定值集中在 firebase-options.js
 
 // 用不同的 app 名稱（"admin"）初始化，避免萬一同一個瀏覽器分頁裡
 // 同時載入到一般頁面邏輯時互相干擾（正常情況下 admin.html 與
