@@ -297,9 +297,13 @@ function myMember() {
   // 權限以 Firebase Authentication 的 UID 綁定，不再採用前端自行選擇的 memberId。
   return (state.trip.members || []).find((m) => memberUids(m).includes(currentUid())) || null;
 }
+function normalizePermission(permission) {
+  return ["owner", "editor", "viewer"].includes(permission) ? permission : "viewer_unset";
+}
+
 function myPermission() {
   const m = myMember();
-  return m ? m.permission : "viewer_unset"; // 尚未選擇身份 -> 視同唯讀
+  return m ? normalizePermission(m.permission) : "viewer_unset"; // 尚未綁定身份或資料異常 -> 視同唯讀
 }
 function canEditItinerary() {
   const p = myPermission();
@@ -581,8 +585,8 @@ async function approveAccessRequest(requestId, requestedUid, memberId) {
   const target = members.find((m) => m.id === memberId);
   if (!target) throw new Error("找不到要綁定的成員");
   if (target.permission === "owner") throw new Error("不能把申請者綁定到統籌人欄位");
-  const previousUid = target.uid || null;
-  target.uids = [...new Set([...(Array.isArray(target.uids) ? target.uids : []), ...(previousUid ? [previousUid] : []), requestedUid])];
+  const previousUids = memberUids(target);
+  target.uids = [...new Set([...previousUids, requestedUid])];
   target.uid = target.uids[0] || requestedUid;
   target.permission = "editor";
   await updateTripMembers(members);
@@ -2768,7 +2772,11 @@ function renderCurrencySettingsModal() {
 // 管理成員與權限（僅統籌人 owner 可操作）
 // ------------------------------------------------------------
 function renderManageMembersModal() {
-  let members = state.trip.members.map((m) => ({ ...m }));
+  if (!isOwner()) {
+    toast("只有統籌人可以管理成員與權限");
+    return;
+  }
+  let members = state.trip.members.map((m) => ({ ...m, uids: memberUids(m) }));
 
   function rowHtml(m) {
     return `
@@ -2828,7 +2836,7 @@ function renderManageMembersModal() {
         wrap.innerHTML = `<p style="color:var(--text-muted);font-size:13px;">目前沒有待審核申請。</p>`;
         return;
       }
-      const candidates = members.filter((m) => m.permission !== "owner" && !m.uid);
+      const candidates = members.filter((m) => m.permission !== "owner" && memberUids(m).length === 0);
       wrap.innerHTML = requests.map((r) => `
         <div class="card" style="padding:10px;margin-bottom:8px;">
           <div style="font-size:12px;word-break:break-all;">UID：${escapeHtml(r.requestedUid)}</div>
