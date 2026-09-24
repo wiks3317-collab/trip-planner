@@ -102,11 +102,21 @@ service cloud.firestore {
       return signedIn();
     }
 
-    // 行程「內容」（days / spots / wishes / expenses）只有已綁定成員身份的 UID 才能讀取。
-    // 行程主文件（名稱、成員名單）仍維持 canReadTrip，讓訪客能看到申請畫面並送出加入申請。
+    // 行程「內容」（days / spots / wishes / expenses）只有已綁定成員身份的 UID，
+    // 或是系統管理員，才能讀取。行程主文件（名稱、成員名單）仍維持 canReadTrip，
+    // 讓訪客能看到申請畫面並送出加入申請。
     function canReadContent(tripId) {
       return signedIn()
-        && (request.auth.uid in tripDoc(tripId).data.access);
+        && ((request.auth.uid in tripDoc(tripId).data.access) || isAdmin());
+    }
+
+    // 行程是否處於「啟用中」：只有系統管理員能把 disabled 設成 true／false
+    // （見下面 trips 的 update 規則裡專屬管理員的那個分支）。沒有 disabled 欄位、
+    // 或 disabled 不是 true，一律視為啟用中，所以現有行程完全不受影響。
+    // 停用後，包含統籌人在內的所有一般使用者都無法再新增／修改／刪除天數、景點、
+    // 許願池留言與記帳明細，也不能改行程主文件；只有管理員能把它改回啟用。
+    function tripActive(tripId) {
+      return !('disabled' in tripDoc(tripId).data) || tripDoc(tripId).data.disabled != true;
     }
 
     match /trips/{tripId} {
@@ -127,12 +137,14 @@ service cloud.firestore {
       // 認領前的舊行程仍存在「任何已登入者都可能先認領」的過渡期風險，完成認領後即改由 UID 控管。
       allow update: if (
           isOwner(tripId)
+          && tripActive(tripId)
           && protectedTripFieldsUnchanged(tripId)
           && validTripBase(request.resource.data)
         )
         || (
           signedIn()
           && canEdit(tripId)
+          && tripActive(tripId)
           && !isOwner(tripId)
           && protectedTripFieldsUnchanged(tripId)
           && membershipUnchanged(tripId)
@@ -143,34 +155,46 @@ service cloud.firestore {
         || (
           signedIn()
           && isLegacyTrip(tripId)
+          && tripActive(tripId)
           && request.resource.data.ownerUid == request.auth.uid
           && request.resource.data.access[request.auth.uid] == 'owner'
           && request.resource.data.authModelVersion == 2
+        )
+        // 系統管理員專用：只能切換 disabled／disabledAt／disabledBy 這三個欄位（停用／恢復行程），
+        // 不能透過這個管道改名稱、成員、權限等其他欄位。故意不要求 tripActive(tripId)，
+        // 否則已停用的行程會沒辦法被管理員自己改回啟用。
+        || (
+          isAdmin()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['disabled', 'disabledAt', 'disabledBy'])
+          && (!('disabled' in request.resource.data) || request.resource.data.disabled is bool)
         );
       allow delete: if false;
 
       match /days/{dayId} {
         allow read: if canReadContent(tripId);
-        allow create, update, delete: if signedIn() && canEdit(tripId);
+        allow create, update, delete: if signedIn() && canEdit(tripId) && tripActive(tripId);
 
         match /spots/{spotId} {
           allow read: if canReadContent(tripId);
-          allow create, update, delete: if signedIn() && canEdit(tripId);
+          allow create, update, delete: if signedIn() && canEdit(tripId) && tripActive(tripId);
 
           // 許願池：已綁定成員（含唯讀）都可以留言，並且只能修改／刪除自己（authorUid）的留言；
-          // 統籌人與編輯者維持原本權限（可管理所有留言、搬移景點時複製留言）。
+          // 統籌人與編輯者維持原本權限（可管理所有留言、搬移景點時複製留言）。停用中的行程一律不可寫入。
           match /wishes/{wishId} {
             allow read: if canReadContent(tripId);
-            allow create: if canEdit(tripId)
-              || (canReadContent(tripId)
-                && request.resource.data.authorUid == request.auth.uid);
-            allow update: if canEdit(tripId)
-              || (canReadContent(tripId)
-                && resource.data.get('authorUid', null) == request.auth.uid
-                && request.resource.data.get('authorUid', null) == request.auth.uid);
-            allow delete: if canEdit(tripId)
-              || (canReadContent(tripId)
-                && resource.data.get('authorUid', null) == request.auth.uid);
+            allow create: if tripActive(tripId)
+              && (canEdit(tripId)
+                || (canReadContent(tripId)
+                  && request.resource.data.authorUid == request.auth.uid));
+            allow update: if tripActive(tripId)
+              && (canEdit(tripId)
+                || (canReadContent(tripId)
+                  && resource.data.get('authorUid', null) == request.auth.uid
+                  && request.resource.data.get('authorUid', null) == request.auth.uid));
+            allow delete: if tripActive(tripId)
+              && (canEdit(tripId)
+                || (canReadContent(tripId)
+                  && resource.data.get('authorUid', null) == request.auth.uid));
           }
         }
       }
@@ -178,25 +202,28 @@ service cloud.firestore {
       match /expenses/{expenseId} {
         allow read: if canReadContent(tripId);
 
-        // 所有已綁定成員都可新增；建立者 UID 必須由目前登入者寫入。
+        // 所有已綁定成員都可新增；建立者 UID 必須由目前登入者寫入。停用中的行程不可新增。
         allow create: if canReadContent(tripId)
+          && tripActive(tripId)
           && request.resource.data.createdByUid == request.auth.uid
           && validExpense(request.resource.data);
 
         // 所有角色都不得在更新時竄改建立者 UID；owner/editor 可管理全部，
-        // viewer 僅可修改自己建立的明細。
-        allow update: if (canEdit(tripId)
-            && request.resource.data.get('createdByUid', null) == resource.data.get('createdByUid', null)
-            && validExpense(request.resource.data))
-          || (canReadContent(tripId)
-            && resource.data.get('createdByUid', null) == request.auth.uid
-            && request.resource.data.get('createdByUid', null) == resource.data.get('createdByUid', null)
-            && validExpense(request.resource.data));
+        // viewer 僅可修改自己建立的明細。停用中的行程不可修改。
+        allow update: if tripActive(tripId)
+          && ((canEdit(tripId)
+              && request.resource.data.get('createdByUid', null) == resource.data.get('createdByUid', null)
+              && validExpense(request.resource.data))
+            || (canReadContent(tripId)
+              && resource.data.get('createdByUid', null) == request.auth.uid
+              && request.resource.data.get('createdByUid', null) == resource.data.get('createdByUid', null)
+              && validExpense(request.resource.data)));
 
-        // owner/editor 可刪除全部；viewer 僅可刪除自己建立的明細。
-        allow delete: if canEdit(tripId)
-          || (canReadContent(tripId)
-            && resource.data.get('createdByUid', null) == request.auth.uid);
+        // owner/editor 可刪除全部；viewer 僅可刪除自己建立的明細。停用中的行程不可刪除。
+        allow delete: if tripActive(tripId)
+          && (canEdit(tripId)
+            || (canReadContent(tripId)
+              && resource.data.get('createdByUid', null) == request.auth.uid));
       }
 
       // 邀請連結管理鏡像資料：只有統籌人可以查詢／列出自己行程的邀請連結清單，
