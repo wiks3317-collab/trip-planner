@@ -279,6 +279,7 @@ const state = {
   wishes: [],
   expenses: [],
   tripSection: "itinerary", // 'itinerary' | 'expenses'
+  openedViaInvite: false, // 是否由邀請連結進入
   unsub: {},             // active onSnapshot unsubscribe fns, keyed
 };
 
@@ -457,11 +458,12 @@ async function route() {
 async function resolveTripShortCode(code) {
   renderLoading();
   const data = await getShortlinkData(code);
-  if (!data || data.type !== "trip" || !data.tripId) {
+  if (!data || !["trip", "tripInvite"].includes(data.type) || !data.tripId) {
     toast("這組行程代碼或連結已失效，請確認是否輸入正確");
     navigate("");
     return;
   }
+  state.openedViaInvite = data.type === "tripInvite";
   navigate(`#/trip/${data.tripId}`);
 }
 
@@ -992,6 +994,18 @@ async function ensureTripShareCode() {
   return result;
 }
 
+async function ensureTripInviteCode() {
+  if (state.trip && state.trip.inviteCode) return { code: state.trip.inviteCode, error: null };
+  const result = await createShortlink({ type: "tripInvite", tripId: state.tripId });
+  if (!result.code) return result;
+  try {
+    await updateDoc(doc(db, "trips", state.tripId), { inviteCode: result.code });
+  } catch (err) {
+    console.error("[shortlinks] 寫回行程的 inviteCode 失敗", err);
+  }
+  return result;
+}
+
 async function renderShareTripModal() {
   openModal("分享此行程", `<p style="color:var(--text-muted);">正在產生短連結...</p>`);
   const { code, error } = await ensureTripShareCode();
@@ -1019,6 +1033,13 @@ async function renderShareTripModal() {
     </div>
     <button class="secondary-btn full-width" id="copy-share-code-btn">📋 複製代碼</button>
 
+    <div class="readonly-banner" style="margin-top:14px;">
+      <strong>邀請連結（開啟後可申請編輯權限）</strong>
+      <p style="font-size:13px;color:var(--text-muted);margin:6px 0 10px;">對方透過此連結進入後，仍然是唯讀身份；如需編輯，必須按「申請編輯權限」由統籌人核准。</p>
+      <button class="secondary-btn full-width" id="create-invite-link-btn">產生邀請連結</button>
+      <div id="invite-link-result" style="margin-top:8px;"></div>
+    </div>
+
     <div class="form-actions">
       ${navigator.share ? `<button class="secondary-btn" id="native-share-btn">📤 用系統分享</button>` : ""}
       <button class="primary-btn" id="share-close-btn">完成</button>
@@ -1027,6 +1048,29 @@ async function renderShareTripModal() {
   document.getElementById("share-close-btn").onclick = closeModal;
   document.getElementById("copy-share-link-btn").addEventListener("click", () => copyText(link, "連結已複製"));
   document.getElementById("copy-share-code-btn").addEventListener("click", () => copyText(code, "代碼已複製"));
+  document.getElementById("copy-share-code-btn").addEventListener("click", () => copyText(code, "代碼已複製"));
+  document.getElementById("create-invite-link-btn").addEventListener("click", async () => {
+    const btn = document.getElementById("create-invite-link-btn");
+    const resultEl = document.getElementById("invite-link-result");
+    btn.disabled = true;
+    btn.textContent = "產生中...";
+    try {
+      const invite = await ensureTripInviteCode();
+      if (!invite.code) {
+        resultEl.innerHTML = `<p style="color:var(--danger);">${shortlinkErrorMessage(invite.error)}</p>`;
+      } else {
+        const inviteLink = `${window.location.origin}${window.location.pathname}#/s/${invite.code}`;
+        resultEl.innerHTML = `<input type="text" readonly value="${escapeHtml(inviteLink)}" onclick="this.select()" style="width:100%;"><button class="secondary-btn full-width" id="copy-invite-link-btn" style="margin-top:6px;">📋 複製邀請連結</button>`;
+        document.getElementById("copy-invite-link-btn").onclick = () => copyText(inviteLink, "邀請連結已複製");
+      }
+    } catch (err) {
+      console.error(err);
+      resultEl.innerHTML = `<p style="color:var(--danger);">邀請連結產生失敗，請確認 Firebase 規則已更新。</p>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "重新產生／顯示邀請連結";
+    }
+  });
   const nativeBtn = document.getElementById("native-share-btn");
   if (nativeBtn) {
     nativeBtn.addEventListener("click", () => {
@@ -1544,6 +1588,7 @@ function renderTripHome() {
       <button class="tab-btn ${state.tripSection === "expenses" ? "active" : ""}" id="tab-expenses">💰 記帳與分帳</button>
     </div>
     <div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>目前裝置 UID：<code id="current-device-uid" style="word-break:break-all;">${escapeHtml(currentUid() || "尚未取得")}</code></span><button class="secondary-btn small-btn" id="copy-device-uid-btn">複製 UID</button></div>
+    ${state.openedViaInvite ? `<div class="readonly-banner"><strong>你是透過邀請連結進入此行程</strong><div style="font-size:13px;margin-top:4px;">目前仍為唯讀瀏覽；如需編輯，請按下方「申請編輯權限」，由統籌人審核。</div></div>` : ""}
     ${isLegacyTrip() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>這是舊版行程資料，目前尚未綁定新的身份權限。</span><button class="secondary-btn small-btn" id="claim-legacy-trip-btn">我是原統籌人，進行資料銜接</button></div>` : (!canEditItinerary() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>你目前是唯讀身份，可以瀏覽行程、許願池留言與記帳，但無法新增或編輯行程內容。</span><button class="secondary-btn small-btn" id="request-edit-access-btn">申請編輯權限</button></div>` : "")}
     <div id="day-selector-wrap"></div>
     <div id="day-content"></div>
