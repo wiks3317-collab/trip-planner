@@ -48,6 +48,13 @@ service cloud.firestore {
       return signedIn();
     }
 
+    // 行程「內容」（days / spots / wishes / expenses）只有已綁定成員身份的 UID 才能讀取。
+    // 行程主文件（名稱、成員名單）仍維持 canReadTrip，讓訪客能看到申請畫面並送出加入申請。
+    function canReadContent(tripId) {
+      return signedIn()
+        && (request.auth.uid in tripDoc(tripId).data.access);
+    }
+
     match /trips/{tripId} {
       allow create: if signedIn()
         && request.resource.data.ownerUid == request.auth.uid
@@ -82,22 +89,22 @@ service cloud.firestore {
       allow delete: if false;
 
       match /days/{dayId} {
-        allow read: if signedIn() && canReadTrip(tripId);
+        allow read: if canReadContent(tripId);
         allow create, update, delete: if signedIn() && canEdit(tripId);
 
         match /spots/{spotId} {
-          allow read: if signedIn() && canReadTrip(tripId);
+          allow read: if canReadContent(tripId);
           allow create, update, delete: if signedIn() && canEdit(tripId);
 
           match /wishes/{wishId} {
-            allow read: if signedIn() && canReadTrip(tripId);
+            allow read: if canReadContent(tripId);
             allow create, update, delete: if signedIn() && canEdit(tripId);
           }
         }
       }
 
       match /expenses/{expenseId} {
-        allow read: if signedIn() && canReadTrip(tripId);
+        allow read: if canReadContent(tripId);
         allow create, update, delete: if signedIn() && canEdit(tripId);
       }
 
