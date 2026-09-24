@@ -35,12 +35,19 @@ const auth = getAuth(app);
 let authReadyResolve;
 export const authReady = new Promise((res) => (authReadyResolve = res));
 
-signInAnonymously(auth).catch((err) => {
-  console.error("匿名登入失敗", err);
-  authReadyResolve(null);
+// 注意：全新瀏覽器（例如無痕視窗）第一次載入時，onAuthStateChanged 會先回傳 user = null，
+// 這時匿名登入還沒完成。如果此時就讓網站開始讀取資料，Firestore 會因為「未登入」而拒絕，
+// 造成邀請連結被誤判為失效。所以只有在真的拿到 user 之後，才算 authReady。
+onAuthStateChanged(auth, (user) => {
+  if (user) authReadyResolve(user);
 });
 
-onAuthStateChanged(auth, (user) => authReadyResolve(user));
+signInAnonymously(auth)
+  .then((cred) => authReadyResolve(cred.user))
+  .catch((err) => {
+    console.error("匿名登入失敗", err);
+    authReadyResolve(null);
+  });
 
 window.__FIREBASE__ = { app, db, auth };
 export { app, db, auth };
