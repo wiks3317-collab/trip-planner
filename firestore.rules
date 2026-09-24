@@ -78,6 +78,9 @@ service cloud.firestore {
           && !isOwner(tripId)
           && protectedTripFieldsUnchanged(tripId)
           && membershipUnchanged(tripId)
+          // 編輯者只能改這些欄位（行程名稱、幣別、匯率、背景）；成員與權限只有統籌人能改。
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['name', 'currencies', 'fxRates', 'backgroundImageUrl', 'backgroundDim'])
         )
         || (
           signedIn()
@@ -96,9 +99,20 @@ service cloud.firestore {
           allow read: if canReadContent(tripId);
           allow create, update, delete: if signedIn() && canEdit(tripId);
 
+          // 許願池：已綁定成員（含唯讀）都可以留言，並且只能修改／刪除自己（authorUid）的留言；
+          // 統籌人與編輯者維持原本權限（可管理所有留言、搬移景點時複製留言）。
           match /wishes/{wishId} {
             allow read: if canReadContent(tripId);
-            allow create, update, delete: if signedIn() && canEdit(tripId);
+            allow create: if canEdit(tripId)
+              || (canReadContent(tripId)
+                && request.resource.data.authorUid == request.auth.uid);
+            allow update: if canEdit(tripId)
+              || (canReadContent(tripId)
+                && resource.data.get('authorUid', null) == request.auth.uid
+                && request.resource.data.get('authorUid', null) == request.auth.uid);
+            allow delete: if canEdit(tripId)
+              || (canReadContent(tripId)
+                && resource.data.get('authorUid', null) == request.auth.uid);
           }
         }
       }
@@ -138,10 +152,6 @@ service cloud.firestore {
             || requestId == request.auth.uid);
         allow list: if isOwner(tripId);
         allow update: if isOwner(tripId)
-          || (signedIn()
-            && resource.data.requestedUid == request.auth.uid
-            && request.resource.data.requestedUid == resource.data.requestedUid
-            && request.resource.data.status == resource.data.status)
           // 原申請者可將既有的 rejected／approved 申請重新送回 pending。
           // 僅允許修改 status 與 createdAt，保留原有審核欄位，避免申請者竄改其他資料。
           || (signedIn()
@@ -161,7 +171,7 @@ service cloud.firestore {
       // 行程分享代碼只能由該行程統籌人建立；同步清單代碼則由已登入使用者建立。
       allow create: if signedIn()
         && (
-          (request.resource.data.type in ['trip', 'tripInvite']
+          (request.resource.data.type == 'tripInvite'
             && request.resource.data.tripId is string
             && isOwner(request.resource.data.tripId))
           || request.resource.data.type == 'sync'
