@@ -1634,7 +1634,7 @@ function renderTripHome() {
     spotListEl.innerHTML = `<div class="empty-hint">這天還沒有安排景點</div>`;
   } else {
     spotListEl.innerHTML = state.spots.map((s, i) => `
-      <div class="spot-item" data-spotid="${s.id}">
+      <div class="spot-item" data-spotid="${s.id}" data-drag-index="${i}" title="可拖曳排序景點">
         ${canEdit ? `
           <div class="reorder-col">
             <button class="reorder-btn" data-move="up" data-idx="${i}" ${i === 0 ? "disabled" : ""}>▲</button>
@@ -1657,12 +1657,65 @@ function renderTripHome() {
         moveSpot(day.id, idx, btn.dataset.move === "up" ? -1 : 1);
       });
     });
+    if (canEdit) enableDragReorder(spotListEl, ".spot-item", (from, to) => reorderSpotsByDrag(day.id, from, to));
   }
 }
 
 function dayIndexLabel(dayId) {
   const idx = state.days.findIndex((d) => d.id === dayId);
   return idx >= 0 ? idx + 1 : "?";
+}
+
+function enableDragReorder(container, itemSelector, onMove) {
+  let dragged = null;
+  container.querySelectorAll(itemSelector).forEach((item) => {
+    item.draggable = true;
+    item.addEventListener("dragstart", (e) => {
+      dragged = item;
+      item.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", item.dataset.dragIndex || "");
+    });
+    item.addEventListener("dragend", () => {
+      item.classList.remove("dragging");
+      dragged = null;
+      container.querySelectorAll(itemSelector).forEach((el) => el.classList.remove("drag-over"));
+    });
+    item.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      if (dragged && dragged !== item) item.classList.add("drag-over");
+      e.dataTransfer.dropEffect = "move";
+    });
+    item.addEventListener("dragleave", () => item.classList.remove("drag-over"));
+    item.addEventListener("drop", (e) => {
+      e.preventDefault();
+      item.classList.remove("drag-over");
+      if (!dragged || dragged === item) return;
+      const from = Number(dragged.dataset.dragIndex);
+      const to = Number(item.dataset.dragIndex);
+      if (Number.isInteger(from) && Number.isInteger(to) && from !== to) onMove(from, to);
+    });
+  });
+}
+
+async function reorderDaysByDrag(from, to) {
+  if (!canEditItinerary() || from === to) return;
+  const ordered = [...state.days].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  const [moved] = ordered.splice(from, 1);
+  ordered.splice(to, 0, moved);
+  const batchRef = writeBatch(db);
+  ordered.forEach((d, i) => batchRef.update(doc(db, "trips", state.tripId, "days", d.id), { order: i }));
+  await batchRef.commit();
+}
+
+async function reorderSpotsByDrag(dayId, from, to) {
+  if (!canEditItinerary() || from === to) return;
+  const ordered = [...state.spots].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  const [moved] = ordered.splice(from, 1);
+  ordered.splice(to, 0, moved);
+  const batchRef = writeBatch(db);
+  ordered.forEach((spot, i) => batchRef.update(doc(db, "trips", state.tripId, "days", dayId, "spots", spot.id), { order: i }));
+  await batchRef.commit();
 }
 
 function renderDaySelector(container, day) {
@@ -1690,7 +1743,7 @@ function renderDaySelectSheet() {
   openModal("選擇天數", `
     <div class="day-select-list">
       ${state.days.map((d, i) => `
-        <div class="day-select-item ${d.id === state.currentDayId ? "active" : ""}" data-dayid="${d.id}">
+        <div class="day-select-item ${d.id === state.currentDayId ? "active" : ""}" data-dayid="${d.id}" data-drag-index="${i}" title="可拖曳排序天數">
           ${canEdit ? `
             <div class="reorder-col">
               <button class="reorder-btn" data-move="up" data-idx="${i}" ${i === 0 ? "disabled" : ""}>▲</button>
@@ -1722,6 +1775,9 @@ function renderDaySelectSheet() {
   });
   const addBtn = document.getElementById("sheet-add-day-btn");
   if (addBtn) addBtn.addEventListener("click", () => { closeModal(); renderAddDayModal(); });
+  if (canEdit) {
+    enableDragReorder(document.querySelector("#modal-box .day-select-list"), ".day-select-item", reorderDaysByDrag);
+  }
 }
 
 function openConfirm(message, onConfirm) {
