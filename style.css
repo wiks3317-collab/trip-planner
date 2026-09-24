@@ -459,6 +459,7 @@ h1, h2, h3 { font-family: var(--font-heading); }
 .form-row input[type=number],
 .form-row input[type=date],
 .form-row input[type=time],
+.form-row input[type=datetime-local],
 .form-row select,
 .form-row textarea {
   width: 100%;
@@ -606,6 +607,32 @@ h1, h2, h3 { font-family: var(--font-heading); }
   background: var(--bg);
   padding: 3px 9px;
   border-radius: 999px;
+}
+
+.status-tag {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text-muted);
+}
+.status-tag.status-active { background: color-mix(in srgb, var(--primary) 15%, white); color: var(--primary-dark); }
+.status-tag.status-expired,
+.status-tag.status-revoked { background: var(--danger-bg); color: var(--danger); }
+.member-uid-panel {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  margin: -4px 0 10px;
+}
+.invite-link-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-bottom: 8px;
 }
 
 .readonly-banner {
