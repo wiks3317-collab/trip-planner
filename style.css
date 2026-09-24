@@ -667,3 +667,18 @@ h1, h2, h3 { font-family: var(--font-heading); }
   font-size: 13px;
 }
 .size-option-btn.active { border-color: var(--primary); color: var(--primary-dark); background: color-mix(in srgb, var(--primary) 8%, white); }
+
+/* 拖曳排序視覺提示 */
+.day-select-item[draggable="true"],
+.spot-item[draggable="true"] {
+  cursor: grab;
+}
+.day-select-item.dragging,
+.spot-item.dragging {
+  opacity: 0.45;
+}
+.day-select-item.drag-over,
+.spot-item.drag-over {
+  outline: 2px dashed var(--accent, #4f46e5);
+  outline-offset: 2px;
+}
