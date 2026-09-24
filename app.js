@@ -176,6 +176,12 @@ function currentUid() {
   return auth.currentUser?.uid || null;
 }
 
+function memberUids(member) {
+  const values = Array.isArray(member?.uids) ? [...member.uids] : [];
+  if (member?.uid && !values.includes(member.uid)) values.unshift(member.uid);
+  return [...new Set(values.filter(Boolean))];
+}
+
 // ------------------------------------------------------------
 // 外觀設定（顏色 / 字型 / 字級）— 存在裝置本機，套用到整個網頁
 // ------------------------------------------------------------
@@ -278,7 +284,7 @@ function clearAllUnsub() {
 function myMember() {
   if (!state.trip || !currentUid()) return null;
   // 權限以 Firebase Authentication 的 UID 綁定，不再採用前端自行選擇的 memberId。
-  return (state.trip.members || []).find((m) => m.uid === currentUid()) || null;
+  return (state.trip.members || []).find((m) => m.uid === currentUid() || (Array.isArray(m.uids) && m.uids.includes(currentUid()))) || null;
 }
 function myPermission() {
   const m = myMember();
@@ -492,7 +498,8 @@ async function createTrip(name, members) {
   const owner = boundMembers.find((m) => m.permission === "owner" && m.uid);
   const access = {};
   boundMembers.forEach((m) => {
-    if (m.uid && !access[m.uid]) access[m.uid] = m.permission;
+    const uids = Array.isArray(m.uids) ? m.uids : (m.uid ? [m.uid] : []);
+    uids.forEach((uid) => { if (uid && !access[uid]) access[uid] = m.permission; });
   });
   const ref = await addDoc(collection(db, "trips"), {
     name,
@@ -507,11 +514,26 @@ async function createTrip(name, members) {
 }
 
 async function updateTripMembers(members) {
+  const normalizedMembers = members.map((m) => ({ ...m, uids: memberUids(m) }));
+  const ownerUid = state.trip?.ownerUid || currentUid();
+  const owners = normalizedMembers.filter((m) => m.permission === "owner");
+  const boundOwner = normalizedMembers.find((m) => memberUids(m).includes(ownerUid));
+
+  // 避免在成員管理畫面中意外移除真正的統籌人，或建立第二位 owner。
+  if (!ownerUid || owners.length !== 1 || !boundOwner || boundOwner.permission !== "owner") {
+    throw new Error("統籌人資料不完整，請保留原統籌人且不可新增第二位統籌人");
+  }
+
   const access = {};
-  members.forEach((m) => {
-    if (m.uid) access[m.uid] = m.permission;
+  normalizedMembers.forEach((m) => {
+    memberUids(m).forEach((uid) => { if (uid) access[uid] = m.permission; });
   });
-  await updateDoc(doc(db, "trips", state.tripId), { members, access });
+  await updateDoc(doc(db, "trips", state.tripId), {
+    members: normalizedMembers,
+    access,
+    ownerUid,
+    authModelVersion: 2,
+  });
 }
 
 async function createEditAccessRequest() {
@@ -582,11 +604,11 @@ async function claimLegacyTrip() {
     uid: i === ownerIndex ? uid : (m.uid || null),
   }));
   const access = {};
-  members.forEach((m) => {
-    if (m.uid) access[m.uid] = m.permission;
+  normalizedMembers.forEach((m) => {
+    memberUids(m).forEach((uid) => { if (uid) access[uid] = m.permission; });
   });
   await updateDoc(doc(db, "trips", state.tripId), {
-    members,
+    members: normalizedMembers,
     ownerUid: uid,
     access,
     authModelVersion: 2,
@@ -2779,9 +2801,14 @@ function renderManageMembersModal() {
     if (!cleaned.some((m) => m.permission === "owner")) {
       return toast("至少要有一位統籌人（owner）");
     }
-    await updateTripMembers(cleaned);
-    closeModal();
-    toast("已更新成員設定");
+    try {
+      await updateTripMembers(cleaned);
+      closeModal();
+      toast("已更新成員設定");
+    } catch (err) {
+      console.error(err);
+      toast(err.message || "成員設定儲存失敗，請確認統籌人資料");
+    }
   };
 }
 
