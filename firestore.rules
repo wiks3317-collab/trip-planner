@@ -31,6 +31,16 @@ service cloud.firestore {
       return isOwner(tripId) || role(tripId) == 'owner' || role(tripId) == 'editor';
     }
 
+    function protectedTripFieldsUnchanged(tripId) {
+      return request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.authModelVersion == resource.data.authModelVersion;
+    }
+
+    function membershipUnchanged(tripId) {
+      return request.resource.data.members == resource.data.members
+        && request.resource.data.access == resource.data.access;
+    }
+
     // 行程資料目前採「知道行程 ID／取得分享連結即可讀取」的模式。
     // 讀取權限與編輯權限分離：未綁定 UID 的訪客只能讀取，不能修改。
     // 使用者已接受行程內容不必作為私人資料保護；後續仍可再加入邀請碼或更細緻的讀取控管。
@@ -51,32 +61,44 @@ service cloud.firestore {
 
       // 舊行程只能進行一次性認領：新資料必須把目前登入 UID 設為 owner。
       // 認領前的舊行程仍存在「任何已登入者都可能先認領」的過渡期風險，完成認領後即改由 UID 控管。
-      allow update: if isOwner(tripId)
-        || (signedIn()
+      allow update: if (
+          isOwner(tripId)
+          && protectedTripFieldsUnchanged(tripId)
+        )
+        || (
+          signedIn()
+          && canEdit(tripId)
+          && !isOwner(tripId)
+          && protectedTripFieldsUnchanged(tripId)
+          && membershipUnchanged(tripId)
+        )
+        || (
+          signedIn()
           && isLegacyTrip(tripId)
           && request.resource.data.ownerUid == request.auth.uid
           && request.resource.data.access[request.auth.uid] == 'owner'
-          && request.resource.data.authModelVersion == 2);
+          && request.resource.data.authModelVersion == 2
+        );
       allow delete: if false;
 
       match /days/{dayId} {
         allow read: if signedIn() && canReadTrip(tripId);
-        allow create, update, delete: if signedIn() && (isLegacyTrip(tripId) || canEdit(tripId));
+        allow create, update, delete: if signedIn() && canEdit(tripId);
 
         match /spots/{spotId} {
           allow read: if signedIn() && canReadTrip(tripId);
-          allow create, update, delete: if signedIn() && (isLegacyTrip(tripId) || canEdit(tripId));
+          allow create, update, delete: if signedIn() && canEdit(tripId);
 
           match /wishes/{wishId} {
             allow read: if signedIn() && canReadTrip(tripId);
-            allow create, update, delete: if signedIn() && (isLegacyTrip(tripId) || canEdit(tripId));
+            allow create, update, delete: if signedIn() && canEdit(tripId);
           }
         }
       }
 
       match /expenses/{expenseId} {
         allow read: if signedIn() && canReadTrip(tripId);
-        allow create, update, delete: if signedIn() && (isLegacyTrip(tripId) || canEdit(tripId));
+        allow create, update, delete: if signedIn() && canEdit(tripId);
       }
 
       match /accessRequests/{requestId} {
