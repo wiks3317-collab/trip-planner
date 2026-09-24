@@ -16,7 +16,9 @@ service cloud.firestore {
     }
 
     function isOwner(tripId) {
-      return signedIn() && tripDoc(tripId).data.ownerUid == request.auth.uid;
+      return signedIn()
+        && (tripDoc(tripId).data.ownerUid == request.auth.uid
+          || tripDoc(tripId).data.access[request.auth.uid] == 'owner');
     }
 
     function role(tripId) {
@@ -85,8 +87,7 @@ service cloud.firestore {
           && canReadTrip(tripId);
         allow get: if signedIn()
           && (isOwner(tripId)
-            || requestId == request.auth.uid
-            || resource.data.requestedUid == request.auth.uid);
+            || requestId == request.auth.uid);
         allow list: if isOwner(tripId);
         allow update: if isOwner(tripId)
           || (signedIn()
