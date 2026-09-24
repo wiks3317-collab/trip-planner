@@ -21,6 +21,13 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.get('canEdit', false) == true;
     }
 
+    // 可改成員權限與 UID 的管理員：admins/{uid} 文件需另外設定 canManageMembers: true。
+    // 與 canEdit 分開，因為改 UID／權限等於能決定「誰能編輯這個行程」，風險較高。
+    function isAdminMemberManager() {
+      return isAdmin()
+        && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.get('canManageMembers', false) == true;
+    }
+
     // 天數／景點的基本欄位驗證（寬鬆：欄位不存在或為 null 都放行，避免影響既有資料）。
     function validContentDoc(data) {
       return (!('title' in data) || data.title == null || (data.title is string && data.title.size() <= 500))
@@ -121,7 +128,7 @@ service cloud.firestore {
     // 讓訪客能看到申請畫面並送出加入申請。
     function canReadContent(tripId) {
       return signedIn()
-        && ((request.auth.uid in tripDoc(tripId).data.access) || isAdmin());
+        && (((request.auth.uid in tripDoc(tripId).data.access) && tripNotDeleted(tripId)) || isAdmin());
     }
 
     // 行程是否處於「啟用中」：只有系統管理員能把 disabled 設成 true／false
@@ -129,8 +136,14 @@ service cloud.firestore {
     // 或 disabled 不是 true，一律視為啟用中，所以現有行程完全不受影響。
     // 停用後，包含統籌人在內的所有一般使用者都無法再新增／修改／刪除天數、景點、
     // 許願池留言與記帳明細，也不能改行程主文件；只有管理員能把它改回啟用。
+    function tripNotDeleted(tripId) {
+      return !('deleted' in tripDoc(tripId).data) || tripDoc(tripId).data.deleted != true;
+    }
+
+    // 已軟刪除的行程一律視同停用：一般使用者不能讀取內容、也不能寫入；只有管理員能還原。
     function tripActive(tripId) {
-      return !('disabled' in tripDoc(tripId).data) || tripDoc(tripId).data.disabled != true;
+      return (!('disabled' in tripDoc(tripId).data) || tripDoc(tripId).data.disabled != true)
+        && tripNotDeleted(tripId);
     }
 
     match /trips/{tripId} {
@@ -192,6 +205,24 @@ service cloud.firestore {
           && request.resource.data.name is string
           && request.resource.data.name.size() > 0
           && request.resource.data.name.size() <= 200
+        )
+        // 軟刪除／還原：只能切換 deleted 相關欄位，資料本身完全保留。
+        || (
+          isAdminEditor()
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['deleted', 'deletedAt', 'deletedBy', 'deletedReason'])
+          && request.resource.data.deleted is bool
+          && (!('deletedReason' in request.resource.data) || request.resource.data.deletedReason is string)
+        )
+        // 管理員調整成員權限與綁定 UID：members／access／ownerUid 必須一起改，且新的 ownerUid 必須是 owner。
+        || (
+          isAdminMemberManager()
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['members', 'access', 'ownerUid'])
+          && validMembers(request.resource.data.members)
+          && request.resource.data.access is map
+          && request.resource.data.ownerUid is string
+          && request.resource.data.access[request.resource.data.ownerUid] == 'owner'
         );
       allow delete: if false;
 
