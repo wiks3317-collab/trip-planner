@@ -5,6 +5,14 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    // 系統管理員：admins/{uid} 這份文件是否存在，由你在 Firebase Console 手動新增／刪除，
+    // 前端完全沒有寫入權限（見下面 admins 的規則）。exists() 是 Rules 內建函式，
+    // 不受目標文件自己的讀取規則限制，所以這裡不需要額外開放 admins 的 get 權限也能判斷。
+    function isAdmin() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
     function tripDoc(tripId) {
       return get(/databases/$(database)/documents/trips/$(tripId));
     }
@@ -110,7 +118,10 @@ service cloud.firestore {
 
       // 過渡期：舊行程仍可被登入使用者讀取，讓既有資料不會因更新規則而立即失聯。
       allow get: if signedIn() && canReadTrip(tripId);
-      allow list: if false;
+      // 一般使用者仍然不能列出所有行程；只有管理後台（admin.html，Google 登入 + admins/{uid} 存在）
+      // 能列出行程主文件（名稱、成員數、建立時間等摘要），不代表能讀寫天數／景點／留言／帳務等子集合，
+      // 那些仍然只開放給已綁定該行程 access 的 UID（見下面 canReadContent 與各子集合規則）。
+      allow list: if isAdmin();
 
       // 舊行程只能進行一次性認領：新資料必須把目前登入 UID 設為 owner。
       // 認領前的舊行程仍存在「任何已登入者都可能先認領」的過渡期風險，完成認領後即改由 UID 控管。
@@ -237,6 +248,15 @@ service cloud.firestore {
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'createdAt']));
         allow delete: if false;
       }
+    }
+
+    // 系統管理員名單：只能在 Firebase Console 手動新增/刪除文件（文件 ID = 管理員的 Google 登入 UID）。
+    // 前端沒有任何寫入權限；且 list 禁止，避免任何人（含一般登入者）列舉出所有管理員的 UID。
+    // get 只開放給「本人查自己是不是管理員」，admin.js 用這個判斷要不要顯示管理後台內容。
+    match /admins/{uid} {
+      allow get: if signedIn() && request.auth.uid == uid;
+      allow list: if false;
+      allow create, update, delete: if false;
     }
 
     match /shortlinks/{code} {
