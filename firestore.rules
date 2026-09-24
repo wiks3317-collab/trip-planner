@@ -60,6 +60,23 @@ service cloud.firestore {
         && (!('usedCount' in data) || (data.usedCount is int && data.usedCount >= 0));
     }
 
+    function validExpense(data) {
+      return data.title is string
+        && data.title.size() > 0
+        && data.title.size() <= 500
+        && data.amountCents is int
+        && data.amountCents > 0
+        && data.currency is string
+        && data.currency.size() > 0
+        && data.currency.size() <= 10
+        && data.payerId is string
+        && data.splitWith is list
+        && data.date is string
+        && data.date.size() > 0
+        && data.date.size() <= 30
+        && data.createdByUid is string;
+    }
+
     function protectedTripFieldsUnchanged(tripId) {
       return request.resource.data.ownerUid == resource.data.ownerUid
         && request.resource.data.authModelVersion == resource.data.authModelVersion;
@@ -149,7 +166,26 @@ service cloud.firestore {
 
       match /expenses/{expenseId} {
         allow read: if canReadContent(tripId);
-        allow create, update, delete: if signedIn() && canEdit(tripId);
+
+        // 所有已綁定成員都可新增；建立者 UID 必須由目前登入者寫入。
+        allow create: if canReadContent(tripId)
+          && request.resource.data.createdByUid == request.auth.uid
+          && validExpense(request.resource.data);
+
+        // 所有角色都不得在更新時竄改建立者 UID；owner/editor 可管理全部，
+        // viewer 僅可修改自己建立的明細。
+        allow update: if (canEdit(tripId)
+            && request.resource.data.get('createdByUid', null) == resource.data.get('createdByUid', null)
+            && validExpense(request.resource.data))
+          || (canReadContent(tripId)
+            && resource.data.get('createdByUid', null) == request.auth.uid
+            && request.resource.data.get('createdByUid', null) == resource.data.get('createdByUid', null)
+            && validExpense(request.resource.data));
+
+        // owner/editor 可刪除全部；viewer 僅可刪除自己建立的明細。
+        allow delete: if canEdit(tripId)
+          || (canReadContent(tripId)
+            && resource.data.get('createdByUid', null) == request.auth.uid);
       }
 
       // 邀請連結管理鏡像資料：只有統籌人可以查詢／列出自己行程的邀請連結清單，
