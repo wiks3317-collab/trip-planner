@@ -138,7 +138,6 @@ function todayStr() {
 // localStorage 輔助（記住「我在這個裝置上是誰」與「我看過哪些行程」）
 // ------------------------------------------------------------
 const LS_MY_TRIPS = "tp_my_trips";       // [{id, name}]
-const LS_MEMBER_PREFIX = "tp_member_";   // tp_member_{tripId} = memberId
 
 function getMyTrips() {
   try {
@@ -162,15 +161,6 @@ function updateMyTripName(id, name) {
 }
 function removeMyTrip(id) {
   localStorage.setItem(LS_MY_TRIPS, JSON.stringify(getMyTrips().filter((t) => t.id !== id)));
-}
-function getMyMemberId(tripId) {
-  // 舊版相容用：新版本不再以 localStorage 選擇身份。
-  return localStorage.getItem(LS_MEMBER_PREFIX + tripId) || null;
-}
-function setMyMemberId(tripId, memberId) {
-  // 保留舊資料清理能力，但不再由 UI 呼叫來切換權限。
-  if (memberId) localStorage.setItem(LS_MEMBER_PREFIX + tripId, memberId);
-  else localStorage.removeItem(LS_MEMBER_PREFIX + tripId);
 }
 function currentUid() {
   return auth.currentUser?.uid || null;
@@ -887,6 +877,7 @@ async function addWish(dayId, spotId, text, imageUrl, mapUrl, mapAddress) {
     mapUrl: mapUrl || null,
     mapAddress: mapAddress || null,
     authorId: m ? m.id : null,
+    authorUid: currentUid(), // 供 Firestore Rules 驗證「只能修改／刪除自己的留言」
     authorName: m ? m.name : "匿名旅伴",
     createdAt: serverTimestamp(),
   });
@@ -938,8 +929,8 @@ function updateHeader() {
     nameEl.textContent = state.trip.name;
     const m = myMember();
     badge.textContent = m
-      ? `你是：${m.name}${m.permission === "viewer" ? "（唯讀）" : ""} ▾`
-      : "選擇你的身份 ▾";
+      ? `你是：${m.name}${m.permission === "viewer" ? "（唯讀）" : ""}`
+      : "尚未綁定身份";
     badge.classList.remove("hidden");
     shareBtn.classList.remove("hidden");
     renameBtn.classList.toggle("hidden", !isOwner());
@@ -950,9 +941,6 @@ function updateHeader() {
     renameBtn.classList.add("hidden");
   }
 }
-
-// 不再提供「切換身份」入口，避免使用者透過前端選擇其他成員而取得其權限。
-// document.getElementById("current-member-badge").addEventListener("click", renderMemberSwitchModal);
 
 document.getElementById("rename-trip-btn").addEventListener("click", () => {
   if (!state.trip) return;
@@ -974,37 +962,6 @@ document.getElementById("rename-trip-btn").addEventListener("click", () => {
     closeModal();
   };
 });
-
-function renderMemberSwitchModal() {
-  if (!state.trip) return;
-  const members = state.trip.members || [];
-  const my = myMember();
-  openModal("切換身份", `
-    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">選擇你在「${escapeHtml(state.trip.name)}」中的身份。</p>
-    <div class="member-chip-picker">
-      ${members.map((m) => `
-        <button class="member-pick-btn ${my && my.id === m.id ? "active" : ""}" data-id="${m.id}">
-          <span>${escapeHtml(m.name)}</span>
-          <span class="perm-tag">${permLabel(m.permission)}</span>
-        </button>`).join("")}
-    </div>
-    <button class="secondary-btn full-width" id="switch-readonly-btn" style="margin-top:14px;">改用唯讀模式瀏覽（不指定身份）</button>
-  `);
-  document.querySelectorAll("#modal-box .member-pick-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      setMyMemberId(state.tripId, btn.dataset.id);
-      sessionStorage.removeItem("tp_skip_pick_" + state.tripId);
-      closeModal();
-      route();
-    });
-  });
-  document.getElementById("switch-readonly-btn").addEventListener("click", () => {
-    setMyMemberId(state.tripId, null);
-    sessionStorage.setItem("tp_skip_pick_" + state.tripId, "1");
-    closeModal();
-    route();
-  });
-}
 
 document.getElementById("share-btn").addEventListener("click", () => {
   renderShareTripModal();
@@ -1658,37 +1615,6 @@ function renderNewTripModal() {
   };
 }
 
-// ------------------------------------------------------------
-// 選擇「我是誰」
-// ------------------------------------------------------------
-function renderMemberPicker() {
-  const root = document.getElementById("app-root");
-  const members = state.trip.members || [];
-  root.innerHTML = `
-    <div class="card">
-      <h3 style="margin-top:0;">你是「${escapeHtml(state.trip.name)}」的哪一位？</h3>
-      <p style="color:var(--text-muted);font-size:13px;">點選你的名字，這個瀏覽器之後就會記得你的身份。請不要選錯別人的名字喔！</p>
-      <div class="member-chip-picker">
-        ${members.map((m) => `
-          <button class="member-pick-btn" data-id="${m.id}">
-            <span>${escapeHtml(m.name)}</span>
-            <span class="perm-tag">${permLabel(m.permission)}</span>
-          </button>`).join("")}
-      </div>
-      <button class="secondary-btn full-width" id="skip-pick-btn" style="margin-top:14px;">先用唯讀模式瀏覽（不選身份）</button>
-    </div>
-  `;
-  root.querySelectorAll(".member-pick-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      setMyMemberId(state.tripId, btn.dataset.id);
-      route();
-    });
-  });
-  document.getElementById("skip-pick-btn").addEventListener("click", () => {
-    sessionStorage.setItem("tp_skip_pick_" + state.tripId, "1");
-    route();
-  });
-}
 function permLabel(p) {
   if (p === "owner") return "統籌人";
   if (p === "editor") return "可編輯";
@@ -1762,7 +1688,7 @@ function renderTripHome() {
       <button class="tab-btn ${state.tripSection === "itinerary" ? "active" : ""}" id="tab-itinerary">📅 行程</button>
       <button class="tab-btn ${state.tripSection === "expenses" ? "active" : ""}" id="tab-expenses">💰 記帳與分帳</button>
     </div>
-    ${isLegacyTrip() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>這是舊版行程資料，目前尚未綁定新的身份權限。</span><button class="secondary-btn small-btn" id="claim-legacy-trip-btn">我是原統籌人，進行資料銜接</button></div>` : (!canEditItinerary() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>你目前是唯讀身份，可以瀏覽行程、許願池留言與記帳，但無法新增或編輯行程內容。</span><button class="secondary-btn small-btn" id="request-edit-access-btn">申請編輯權限</button></div>` : "")}
+    ${isLegacyTrip() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>這是舊版行程資料，目前尚未綁定新的身份權限。</span><button class="secondary-btn small-btn" id="claim-legacy-trip-btn">我是原統籌人，進行資料銜接</button></div>` : (!canEditItinerary() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>你目前是唯讀身份，可以瀏覽行程與記帳內容，並在許願池留言，但無法新增或編輯行程內容與記帳。</span><button class="secondary-btn small-btn" id="request-edit-access-btn">申請編輯權限</button></div>` : "")}
     <div id="day-selector-wrap"></div>
     <div id="day-content"></div>
   `;
