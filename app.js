@@ -428,8 +428,18 @@ async function route() {
     return;
   }
 
+  // 行程已被管理員軟刪除：從本機「我的行程」移除，只顯示已刪除提示，不訂閱任何內容。
+  if (state.trip.deleted === true) removeMyTrip(state.tripId);
+
   updateHeader();
   renderTripMenu();
+
+  if (state.trip.deleted === true) {
+    stopContentSubscriptions();
+    hideSpotPanel();
+    renderTripDeleted();
+    return;
+  }
 
   // 行程已被系統管理員停用：不論身份（含統籌人），一律不訂閱、不顯示內容，只顯示停用提示。
   // 這只是畫面上的提示，真正擋下寫入的是 Firestore Rules（見 firestore.rules 的 tripActive）。
@@ -1698,6 +1708,16 @@ function renderAccessGate() {
   `;
   attachClaimLegacyHandler(document.getElementById("claim-legacy-trip-btn"));
   attachRequestAccessHandler(document.getElementById("request-edit-access-btn"));
+}
+
+function renderTripDeleted() {
+  const root = document.getElementById("app-root");
+  root.innerHTML = `
+    <div class="card" style="text-align:center;padding:36px 20px;">
+      <h3 style="margin-top:0;">🗑️ 此行程已被刪除</h3>
+      <p style="color:var(--text-muted);">這個行程已被系統管理員刪除，無法再檢視或編輯。如果你認為這是誤刪，請聯絡系統管理員協助還原。</p>
+    </div>
+  `;
 }
 
 function renderTripDisabled() {
