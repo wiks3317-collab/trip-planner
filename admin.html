@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />
+<meta name="googlebot" content="noindex, nofollow, noarchive, nosnippet" />
+<title>管理後台 · 旅行行程規劃工具</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>%F0%9F%9B%A0%EF%B8%8F</text></svg>" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="style.css" />
+<style>
+  /* 只給 admin.html 用的版面樣式，不會影響 style.css 原本給一般頁面用的規則 */
+  body { padding: 24px 16px; }
+  #admin-root { max-width: 900px; margin: 0 auto; }
+  .admin-card {
+    background: var(--card-bg, #fff);
+    border: 1px solid var(--border, #DCE3DC);
+    border-radius: 12px;
+    padding: 24px;
+  }
+  .admin-card h1 { margin: 0 0 8px; font-size: 20px; }
+  .admin-muted { color: var(--text-muted, #5C6A61); font-size: 14px; line-height: 1.6; }
+  .admin-topbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 8px; }
+  .admin-primary-btn, .admin-secondary-btn {
+    font: inherit; cursor: pointer; border-radius: 8px; padding: 10px 16px; font-weight: 600;
+  }
+  .admin-primary-btn { background: var(--primary, #0E6B64); color: #fff; border: none; margin-top: 12px; }
+  .admin-primary-btn:hover { background: var(--primary-dark, #0A5450); }
+  .admin-secondary-btn { background: var(--card-bg, #fff); color: var(--text, #1C2420); border: 1px solid var(--border, #DCE3DC); }
+  .admin-secondary-btn:hover { border-color: var(--primary, #0E6B64); }
+  .admin-uid-box {
+    font-family: monospace; background: var(--bg, #EEF3F0); border: 1px solid var(--border, #DCE3DC);
+    border-radius: 8px; padding: 10px 12px; margin: 8px 0 16px; word-break: break-all; font-size: 13px;
+  }
+  .admin-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 14px; }
+  .admin-table th, .admin-table td { text-align: left; padding: 8px 10px; border-bottom: 1px dashed var(--border, #DCE3DC); }
+  .admin-link { color: var(--primary-dark, #0A5450); font-weight: 600; text-decoration: none; }
+  .admin-link:hover { text-decoration: underline; }
+  code { font-family: monospace; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+  <div id="admin-root"></div>
+  <script type="module" src="admin-firebase-config.js"></script>
+  <script type="module" src="admin.js"></script>
+</body>
+</html>
