@@ -901,17 +901,9 @@ function subscribeExpenses() {
   });
 }
 
-function canManageExpense(expense) {
-  if (canEditItinerary()) return true;
-  return !!expense && expense.createdByUid === currentUid();
-}
-
 async function addExpense({ title, amountCents, currency, payerId, splitWith, date, note }) {
-  const uid = currentUid();
-  if (!uid || !canViewContent()) throw new Error("未登入或尚未綁定行程成員");
   await addDoc(collection(db, "trips", state.tripId, "expenses"), {
     title, amountCents, currency, payerId, splitWith, date, note: note || "",
-    createdByUid: uid,
     createdAt: serverTimestamp(),
   });
 }
@@ -2525,7 +2517,7 @@ function renderExpensesPage() {
     </div>
 
     <div class="section-title">消費明細</div>
-    ${canViewContent() ? `<button class="primary-btn full-width" id="add-expense-btn" style="margin-bottom:12px;">＋ 新增一筆消費</button>` : ""}
+    <button class="primary-btn full-width" id="add-expense-btn" style="margin-bottom:12px;">＋ 新增一筆消費</button>
     <div id="expense-list">
       ${dateKeys.length ? dateKeys.map((dk) => {
         const items = byDate[dk];
@@ -2561,10 +2553,10 @@ function renderExpensesPage() {
                   ${escapeHtml(memberName(e.payerId))} 先付款，由 ${e.splitWith.map(memberName).map(escapeHtml).join("、")} 分攤
                   ${e.note ? ` · ${escapeHtml(e.note)}` : ""}
                 </div>
-                ${canManageExpense(e) ? `<div style="margin-top:6px;display:flex;gap:6px;">
+                <div style="margin-top:6px;display:flex;gap:6px;">
                   <span class="secondary-btn small-btn edit-expense-btn" data-id="${e.id}">編輯</span>
                   <span class="danger-btn small-btn del-expense-btn" data-id="${e.id}">刪除</span>
-                </div>` : ""}
+                </div>
               </div>
             `;
             }).join("")}
@@ -2576,8 +2568,7 @@ function renderExpensesPage() {
 
   document.getElementById("tab-itinerary").onclick = () => navigate(`#/trip/${state.tripId}${state.currentDayId ? "/day/" + state.currentDayId : ""}`);
   document.getElementById("tab-expenses").onclick = () => {};
-  const addExpenseBtn = document.getElementById("add-expense-btn");
-  if (addExpenseBtn) addExpenseBtn.addEventListener("click", () => renderExpenseFormModal(null));
+  document.getElementById("add-expense-btn").addEventListener("click", () => renderExpenseFormModal(null));
   document.getElementById("open-settlement-btn").addEventListener("click", () => renderSettlementModal(transactions));
   const refreshBtn = document.getElementById("refresh-fx-btn");
   if (refreshBtn) refreshBtn.addEventListener("click", () => handleRefreshRates(usedCurrencies));
@@ -2587,13 +2578,11 @@ function renderExpensesPage() {
   root.querySelectorAll(".edit-expense-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const expense = state.expenses.find((e) => e.id === btn.dataset.id);
-      if (expense && canManageExpense(expense)) renderExpenseFormModal(expense);
+      if (expense) renderExpenseFormModal(expense);
     });
   });
   root.querySelectorAll(".del-expense-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const expense = state.expenses.find((e) => e.id === btn.dataset.id);
-      if (!expense || !canManageExpense(expense)) return toast("你只能管理自己新增的明細");
       openConfirm("確定要刪除這筆消費紀錄嗎？", async () => {
         await deleteExpense(btn.dataset.id);
       });
@@ -2700,10 +2689,6 @@ function renderManualFxModal(currencies) {
 }
 
 function renderExpenseFormModal(existing) {
-  if (existing && !canManageExpense(existing)) {
-    toast("你只能管理自己新增的明細");
-    return;
-  }
   const members = state.trip.members;
   const my = myMember();
   const currencies = tripCurrencies();
@@ -3171,7 +3156,7 @@ function renderManageMembersModal() {
         wrap.innerHTML = `<p style="color:var(--text-muted);font-size:13px;">目前沒有待審核申請。</p>`;
         return;
       }
-      const candidates = members.filter((m) => m.permission !== "owner");
+      const candidates = members.filter((m) => m.permission !== "owner" && memberUids(m).length === 0);
       wrap.innerHTML = requests.map((r) => `
         <div class="card" style="padding:10px;margin-bottom:8px;">
           <div style="font-size:12px;word-break:break-all;">UID：${escapeHtml(r.requestedUid)}</div>
