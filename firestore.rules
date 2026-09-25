@@ -317,7 +317,7 @@ service cloud.firestore {
           && request.resource.data.tripId == resource.data.tripId
           && request.resource.data.createdAt == resource.data.createdAt
           && request.resource.data.createdBy == resource.data.createdBy
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revoked', 'expiresAt', 'label', 'updatedAt'])
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revoked', 'expiresAt', 'label', 'maxUses', 'updatedAt'])
           && validInvite(request.resource.data, tripId);
         allow delete: if false;
       }
@@ -393,7 +393,7 @@ service cloud.firestore {
         && request.resource.data.tripId == resource.data.tripId
         && request.resource.data.createdAt == resource.data.createdAt
         && request.resource.data.createdBy == resource.data.createdBy
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revoked', 'expiresAt', 'label', 'updatedAt'])
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revoked', 'expiresAt', 'label', 'maxUses', 'updatedAt'])
         && validInvite(request.resource.data, resource.data.tripId);
       allow delete: if false;
     }
