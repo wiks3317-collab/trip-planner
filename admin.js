@@ -16,6 +16,7 @@ let currentUser = null;
 let tripsCache = [];
 let adminCanEdit = false;
 let adminCanManageMembers = false;
+let lastSignInAt = 0;
 let detailCtx = null;
 
 // ------------------------------------------------------------
@@ -131,7 +132,7 @@ function dashboardShellHtml(user) {
         </div>
         <button id="admin-signout-btn" class="admin-secondary-btn">登出</button>
       </div>
-      <div class="admin-row-actions" style="margin:8px 0;"><button class="admin-secondary-btn" data-act="audit">📜 稽核紀錄</button></div>
+      <div class="admin-row-actions" style="margin:8px 0;"><button class="admin-secondary-btn" data-act="audit">📜 稽核紀錄</button><button class="admin-secondary-btn" data-act="backup-all" id="admin-backup-btn">💾 匯出全部行程備份</button></div>
       <p class="admin-muted">
         「檢視內容」會用管理員身份直接顯示天數、景點、許願池留言與記帳明細，不需要先加入該行程。
         「停用」會讓所有成員（含統籌人）都無法再檢視或編輯行程內容，只有管理員能恢復。
@@ -278,6 +279,22 @@ function ownerNames(trip) {
 // ------------------------------------------------------------
 // 稽核紀錄：所有管理員的寫入都跟一筆 adminAuditLogs 放在同一個 batch 裡一起提交
 // ------------------------------------------------------------
+// 刪除行程／改成員與 UID 屬於高風險操作，Rules 要求 15 分鐘內重新登入過。
+// 這裡先在前端擋一次、給清楚的提示，真正的把關仍在 Rules（recentlyAuthenticated()）。
+async function ensureRecentLogin(actionLabel) {
+  if (Date.now() - lastSignInAt < 14 * 60 * 1000) return true;
+  if (!window.confirm(`「${actionLabel}」屬於高風險操作，需要重新驗證身份。要現在用 Google 帳號重新登入一次嗎？`)) return false;
+  try {
+    const user = await adminSignIn();
+    lastSignInAt = Date.parse(user.metadata?.lastSignInTime || "") || Date.now();
+    return true;
+  } catch (err) {
+    console.error(err);
+    window.alert("重新登入失敗：" + (err.message || String(err)));
+    return false;
+  }
+}
+
 async function commitWithAudit(tripId, action, detail, build) {
   const batch = writeBatch(db);
   build(batch);
@@ -300,15 +317,15 @@ function renderMembersSection(trip) {
   return `
     <h2 class="admin-section-title">👥 成員與權限</h2>
     ${members.length === 0 ? `<p class="admin-muted">沒有成員資料。</p>` : `
-      <table class="admin-table">
+      <div class="admin-table-scroll"><table class="admin-table">
         <thead><tr><th>名稱</th><th>權限</th><th>綁定 UID</th></tr></thead>
         <tbody>
           ${members.map((m) => {
             const uids = Array.isArray(m.uids) ? m.uids : (m.uid ? [m.uid] : []);
-            return `<tr><td>${escapeHtml(m.name || "（未命名）")}</td><td>${escapeHtml(permissionLabel(m.permission))}</td><td><code style="font-size:11px;word-break:break-all;">${uids.map(escapeHtml).join("<br>") || "—"}</code></td></tr>`;
+            return `<tr><td>${escapeHtml(m.name || "（未命名）")}</td><td>${escapeHtml(permissionLabel(m.permission))}</td><td><code style="font-size:11px;">${uids.map(escapeHtml).join("<br>") || "—"}</code></td></tr>`;
           }).join("")}
         </tbody>
-      </table>
+      </table></div>
     `}
   `;
 }
@@ -406,7 +423,7 @@ async function showTripDetail(tripId) {
 
         <h2 class="admin-section-title">💰 記帳明細</h2>
         ${tree.expenses.length === 0 ? `<p class="admin-muted">目前沒有任何記帳明細。</p>` : `
-          <div style="overflow-x:auto;"><table class="admin-table">
+          <div class="admin-table-scroll"><table class="admin-table">
             <thead><tr><th>日期</th><th>項目</th><th>金額</th><th>付款人</th><th>分攤對象</th><th>備註</th>${adminCanEdit ? "<th></th>" : ""}</tr></thead>
             <tbody>
               ${tree.expenses.map((e) => `
@@ -440,6 +457,40 @@ async function showTripDetail(tripId) {
 // ------------------------------------------------------------
 // 匯出 JSON（也會留下稽核紀錄）
 // ------------------------------------------------------------
+// 匯出全部（未刪除）行程的完整內容，當成免費、手動的備份方式。
+// Firestore 的「排程自動匯出」需要升級到付費方案（Blaze），這裡改用純讀取達到同樣效果，
+// 差別只是要手動點擊執行，建議自己抓固定頻率（例如每週）手動做一次。
+async function exportAllTrips() {
+  const btn2 = document.getElementById("admin-backup-btn");
+  const targets = tripsCache.filter((t) => t.deleted !== true);
+  if (!targets.length) return window.alert("目前沒有可備份的行程");
+  if (!window.confirm(`即將讀取並匯出 ${targets.length} 個行程的完整內容，行程數量多時會花一點時間，確定嗎？`)) return;
+  if (btn2) { btn2.disabled = true; btn2.textContent = "備份中...0/" + targets.length; }
+  const result = [];
+  for (let i = 0; i < targets.length; i++) {
+    const t = targets[i];
+    try {
+      const tree = await loadTripTree(t.id, true);
+      result.push({ trip: t, days: tree.days, expenses: tree.expenses });
+    } catch (err) {
+      console.error("備份失敗：", t.id, err);
+      result.push({ trip: t, error: String(err?.message || err) });
+    }
+    if (btn2) btn2.textContent = `備份中...${i + 1}/${targets.length}`;
+  }
+  const json = JSON.stringify({ exportedAt: new Date().toISOString(), tripCount: result.length, trips: result }, function (k, v) {
+    const raw = this[k];
+    return raw && typeof raw.toDate === "function" ? raw.toDate().toISOString() : v;
+  }, 2);
+  await commitWithAudit("(all)", "backup-all", { tripCount: result.length }, () => {});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([json], { type: "application/json" }));
+  a.download = `trips-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  if (btn2) { btn2.disabled = false; btn2.textContent = "💾 匯出全部行程備份"; }
+}
+
 async function exportTrip() {
   const { tripId, trip } = detailCtx;
   const tree = await loadTripTree(tripId, true);
@@ -471,9 +522,9 @@ async function showAuditLog() {
         ${back}
         <h1>稽核紀錄</h1>
         <p class="admin-muted">最近 ${logs.length} 筆管理員操作（只能新增、不能修改或刪除）。</p>
-        <div style="overflow-x:auto;"><table class="admin-table">
+        <div class="admin-table-scroll"><table class="admin-table">
           <thead><tr><th>時間</th><th>管理員</th><th>動作</th><th>行程 ID</th><th>內容</th></tr></thead>
-          <tbody>${logs.map((l) => `<tr><td>${fmtDate(l.createdAt)}</td><td>${escapeHtml(l.adminEmail || l.adminUid || "")}</td><td>${escapeHtml(l.action || "")}</td><td><code>${escapeHtml(l.tripId || "")}</code></td><td style="font-size:12px;word-break:break-all;">${escapeHtml(JSON.stringify(l.detail || {}))}</td></tr>`).join("")}</tbody>
+          <tbody>${logs.map((l) => `<tr><td>${fmtDate(l.createdAt)}</td><td>${escapeHtml(l.adminEmail || l.adminUid || "")}</td><td>${escapeHtml(l.action || "")}</td><td><code>${escapeHtml(l.tripId || "")}</code></td><td style="font-size:12px;max-width:220px;white-space:normal;word-break:break-all;">${escapeHtml(JSON.stringify(l.detail || {}))}</td></tr>`).join("")}</tbody>
         </table></div>
       </div>
     `);
@@ -494,6 +545,7 @@ async function onRootClick(e) {
   const d = el.dataset;
   try {
     if (d.act === "audit") return await showAuditLog();
+    if (d.act === "backup-all") return await exportAllTrips();
     if (d.act.startsWith("mem-")) return await onMemberAction(d);
     if (!detailCtx) return;
     const { tripId, trip, tree } = detailCtx;
@@ -575,6 +627,8 @@ root.addEventListener("click", onRootClick);
 async function toggleTripDeleted(tripId) {
   const trip = tripsCache.find((t) => t.id === tripId);
   if (!trip || !adminCanEdit) return false;
+  const nextLabel = trip.deleted === true ? "還原行程" : "刪除行程";
+  if (!(await ensureRecentLogin(nextLabel))) return false;
   const next = trip.deleted !== true;
   const name = trip.name || tripId;
   const msg = next
@@ -679,6 +733,7 @@ async function onMemberAction(d) {
     return renderMemberEditor();
   }
   if (d.act === "mem-save") {
+    if (!(await ensureRecentLogin("更新成員權限與 UID"))) return;
     const owners = members.filter((m) => m.permission === "owner");
     if (owners.length !== 1) return window.alert("行程必須恰有一位統籌人");
     if (!owners[0].uids.length) return window.alert("統籌人至少要綁定一個 UID");
@@ -740,6 +795,7 @@ onAuthStateChanged(auth, async (user) => {
     if (ok) {
       adminCanEdit = ok.canEdit === true;
       adminCanManageMembers = ok.canManageMembers === true;
+      lastSignInAt = Date.parse(user.metadata?.lastSignInTime || "") || Date.now();
       await renderDashboard(user);
     } else {
       renderNotAdmin(user);
