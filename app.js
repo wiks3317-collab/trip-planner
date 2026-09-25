@@ -6,7 +6,7 @@
 import { db, auth, authReady } from "./firebase-config.js";
 import {
   collection, doc, getDoc, getDocs, setDoc, addDoc, updateDoc, deleteDoc,
-  onSnapshot, query, orderBy, serverTimestamp, writeBatch, Timestamp,
+  onSnapshot, query, orderBy, serverTimestamp, writeBatch, runTransaction, Timestamp,
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 
 // ------------------------------------------------------------
@@ -632,19 +632,30 @@ async function loadAccessRequests() {
 }
 
 async function approveAccessRequest(requestId, requestedUid, memberId) {
-  const members = (state.trip.members || []).map((m) => ({ ...m }));
-  const target = members.find((m) => m.id === memberId);
-  if (!target) throw new Error("找不到要綁定的成員");
-  if (target.permission === "owner") throw new Error("不能把申請者綁定到統籌人欄位");
-  const previousUids = memberUids(target);
-  target.uids = [...new Set([...previousUids, requestedUid])];
-  target.uid = target.uids[0] || requestedUid;
-  target.permission = "editor";
-  await updateTripMembers(members);
-  await updateDoc(doc(db, "trips", state.tripId, "accessRequests", requestId), {
-    status: "approved",
-    approvedMemberId: memberId,
-    approvedAt: serverTimestamp(),
+  if (!state.tripId || !requestedUid || !memberId) {
+    throw new Error("缺少核准申請所需資料");
+  }
+  const tripRef = doc(db, "trips", state.tripId);
+  const requestRef = doc(db, "trips", state.tripId, "accessRequests", requestId);
+  await runTransaction(db, async (tx) => {
+    const [tripSnap, requestSnap] = await Promise.all([tx.get(tripRef), tx.get(requestRef)]);
+    if (!tripSnap.exists() || !requestSnap.exists()) throw new Error("行程或申請資料不存在");
+    const trip = tripSnap.data();
+    const request = requestSnap.data();
+    if (request.status !== "pending" || request.requestedUid !== requestedUid) {
+      throw new Error("這筆申請已被處理，請重新整理後再試");
+    }
+    const latestMembers = (trip.members || []).map((m) => ({ ...m }));
+    const latestTarget = latestMembers.find((m) => m.id === memberId);
+    if (!latestTarget || latestTarget.permission === "owner") throw new Error("找不到可綁定的成員");
+    const uids = memberUids(latestTarget);
+    latestTarget.uids = [...new Set([...uids, requestedUid])];
+    latestTarget.uid = latestTarget.uids[0] || requestedUid;
+    latestTarget.permission = "editor";
+    const access = {};
+    latestMembers.forEach((m) => memberUids(m).forEach((u) => { if (u) access[u] = m.permission; }));
+    tx.update(tripRef, { members: latestMembers, access, authModelVersion: 2 });
+    tx.update(requestRef, { status: "approved", approvedMemberId: memberId, approvedAt: serverTimestamp() });
   });
 }
 
@@ -1417,7 +1428,7 @@ async function createShortlink(data, attempts = 6) {
   for (let i = 0; i < attempts; i++) {
     const code = genShortCode();
     try {
-      await setDoc(doc(db, "shortlinks", code), { ...data, createdAt: serverTimestamp() });
+      await setDoc(doc(db, "shortlinks", code), { ...data, createdBy: currentUid(), createdAt: serverTimestamp() });
       return { code, error: null };
     } catch (err) {
       console.error("[shortlinks] 建立代碼失敗", err);
@@ -1459,9 +1470,6 @@ function copyText(text, successMsg) {
 // 因為沒有帳號登入，這份清單只存在單一瀏覽器裡。
 // 這個功能讓使用者把清單打包成一組短代碼／短連結，帶到另一台裝置匯入。
 // ------------------------------------------------------------
-function encodeSyncCode(list) {
-  return btoa(encodeURIComponent(JSON.stringify(list)));
-}
 function decodeSyncCode(code) {
   return JSON.parse(decodeURIComponent(atob(code)));
 }
