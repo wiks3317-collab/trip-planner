@@ -23,6 +23,12 @@ service cloud.firestore {
 
     // 可改成員權限與 UID 的管理員：admins/{uid} 文件需另外設定 canManageMembers: true。
     // 與 canEdit 分開，因為改 UID／權限等於能決定「誰能編輯這個行程」，風險較高。
+    // 高風險操作（刪除行程、改成員與 UID）要求 15 分鐘內重新登入過，
+    // 降低「登入狀態放很久被盜用」的風險。完全免費，不需要升級付費方案。
+    function recentlyAuthenticated() {
+      return request.time.toMillis() - request.auth.token.auth_time * 1000 < 15 * 60 * 1000;
+    }
+
     function isAdminMemberManager() {
       return isAdmin()
         && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.get('canManageMembers', false) == true;
@@ -209,6 +215,7 @@ service cloud.firestore {
         // 軟刪除／還原：只能切換 deleted 相關欄位，資料本身完全保留。
         || (
           isAdminEditor()
+          && recentlyAuthenticated()
           && request.resource.data.diff(resource.data).affectedKeys()
             .hasOnly(['deleted', 'deletedAt', 'deletedBy', 'deletedReason'])
           && request.resource.data.deleted is bool
@@ -217,6 +224,7 @@ service cloud.firestore {
         // 管理員調整成員權限與綁定 UID：members／access／ownerUid 必須一起改，且新的 ownerUid 必須是 owner。
         || (
           isAdminMemberManager()
+          && recentlyAuthenticated()
           && request.resource.data.diff(resource.data).affectedKeys()
             .hasOnly(['members', 'access', 'ownerUid'])
           && validMembers(request.resource.data.members)
