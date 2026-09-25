@@ -402,7 +402,7 @@ async function showTripDetail(tripId) {
             <button id="admin-toggle-btn" class="admin-secondary-btn" style="margin-top:8px;">${disabled ? "恢復啟用" : "停用此行程"}</button>
           </div>
         </div>
-        <div class="admin-row-actions" style="margin:8px 0;">${btn("export", "⬇ 匯出 JSON")}${adminCanEdit ? btn("rename", "✏️ 修改行程名稱") : ""}${adminCanManageMembers ? btn("mem-edit", "🔑 編輯成員權限／UID") : ""}${adminCanEdit ? btn(trip.deleted === true ? "restore-trip" : "delete-trip", trip.deleted === true ? "♻️ 還原此行程" : "🗑️ 刪除此行程", {}, trip.deleted !== true) : ""}</div>
+        <div class="admin-row-actions" style="margin:8px 0;">${btn("export", "⬇ 匯出 JSON")}${adminCanEdit ? btn("import", "⬆ 匯入為新行程") : ""}${adminCanEdit ? btn("rename", "✏️ 修改行程名稱") : ""}${adminCanManageMembers ? btn("mem-edit", "🔑 編輯成員權限／UID") : ""}${adminCanEdit ? btn(trip.deleted === true ? "restore-trip" : "delete-trip", trip.deleted === true ? "♻️ 還原此行程" : "🗑️ 刪除此行程", {}, trip.deleted !== true) : ""}</div>
         <p class="admin-muted">${adminCanEdit ? "你的帳號具有編輯權限，所有修改都會寫入稽核紀錄。" : "目前是唯讀檢視（此帳號的 admins 文件尚未設定 canEdit: true）。"}</p>
 
         ${renderMembersSection(trip)}
@@ -493,6 +493,46 @@ async function exportAllTrips() {
   if (btn2) { btn2.disabled = false; btn2.textContent = "💾 匯出全部行程備份"; }
 }
 
+async function importTripAsNew() {
+  if (!adminCanEdit || !currentUser?.uid) return;
+  const input = document.createElement("input");
+  input.type = "file"; input.accept = "application/json,.json";
+  input.onchange = async () => {
+    const file = input.files?.[0]; if (!file) return;
+    try {
+      const payload = JSON.parse(await file.text());
+      const source = payload.trip || payload;
+      if (!source || typeof source.name !== "string" || !Array.isArray(payload.days)) throw new Error("JSON 格式不正確");
+      const newTripRef = doc(collection(db, "trips"));
+      const ownerUid = currentUser.uid;
+      const members = [{ id: "member_" + ownerUid.slice(0, 12), name: "匯入者", permission: "owner", uid: ownerUid, uids: [ownerUid] }];
+      const access = { [ownerUid]: "owner" };
+      const cleanTrip = { name: source.name.slice(0, 200), members, ownerUid, access, authModelVersion: 2, createdAt: serverTimestamp(), importedAt: serverTimestamp(), importedFrom: detailCtx?.tripId || null };
+      const batch = writeBatch(db); batch.set(newTripRef, cleanTrip);
+      let count = 1;
+      for (const day of payload.days) {
+        const dayRef = day.id ? doc(newTripRef, "days", day.id) : doc(collection(newTripRef, "days"));
+        const dayData = { ...day }; delete dayData.id; delete dayData.spots;
+        batch.set(dayRef, dayData); count++;
+        for (const spot of (day.spots || [])) {
+          const spotRef = spot.id ? doc(dayRef, "spots", spot.id) : doc(collection(dayRef, "spots"));
+          const spotData = { ...spot }; delete spotData.id; const wishes = Array.isArray(spotData.wishes) ? spotData.wishes : []; delete spotData.wishes;
+          batch.set(spotRef, spotData); count++;
+          for (const wish of wishes) { const wr = wish.id ? doc(spotRef, "wishes", wish.id) : doc(collection(spotRef, "wishes")); const wd = { ...wish }; delete wd.id; wd.authorUid = ownerUid; batch.set(wr, wd); count++; }
+        }
+      }
+      for (const expense of (payload.expenses || [])) { const er = expense.id ? doc(newTripRef, "expenses", expense.id) : doc(collection(newTripRef, "expenses")); const ed = { ...expense }; delete ed.id; ed.createdByUid = ownerUid; batch.set(er, ed); count++; }
+      if (count > 450) throw new Error("匯入資料過多，請拆分後再匯入（單次限制 450 筆）");
+      batch.set(doc(collection(db, "adminAuditLogs")), { adminUid: ownerUid, adminEmail: currentUser.email || null, tripId: newTripRef.id, action: "import", detail: { sourceTripId: detailCtx?.tripId || null, count }, createdAt: serverTimestamp() });
+      await batch.commit();
+      tripsCache.unshift({ id: newTripRef.id, ...cleanTrip });
+      window.alert("已匯入為新行程，原成員 UID 已清除，匯入者為統籌人。");
+      await showTripDetail(newTripRef.id);
+    } catch (err) { console.error(err); window.alert("匯入失敗：" + (err.message || String(err))); }
+  };
+  input.click();
+}
+
 async function exportTrip() {
   const { tripId, trip } = detailCtx;
   const tree = await loadTripTree(tripId, true);
@@ -552,6 +592,7 @@ async function onRootClick(e) {
     if (!detailCtx) return;
     const { tripId, trip, tree } = detailCtx;
     if (d.act === "export") return await exportTrip();
+    if (d.act === "import") return await importTripAsNew();
     if (d.act === "wishes") {
       el.disabled = true;
       el.textContent = "載入中...";
