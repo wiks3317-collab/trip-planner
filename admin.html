@@ -13,6 +13,7 @@
 <link rel="stylesheet" href="style.css" />
 <style>
   /* 只給 admin.html 用的版面樣式，不會影響 style.css 原本給一般頁面用的規則 */
+  html, body { max-width: 100%; overflow-x: hidden; }
   body { padding: 24px 16px; }
   #admin-root { max-width: 900px; margin: 0 auto; }
   .admin-card {
@@ -20,10 +21,17 @@
     border: 1px solid var(--border, #DCE3DC);
     border-radius: 12px;
     padding: 24px;
+    max-width: 100%;
+    overflow-x: hidden; /* 卡片本身絕不橫向溢出，內部個別表格自己捲動 */
   }
+  /* 任何比卡片寬的內容（表格、長 UID／行程 ID）都在自己的容器內橫向捲動，
+     而不是把整個白色卡片撐寬，這是手機版清單「超出白色方格」的主因。 */
+  .admin-table-scroll { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; margin-top: 16px; }
+  .admin-table-scroll .admin-table { margin-top: 0; }
+  .admin-card code { word-break: break-all; }
   .admin-card h1 { margin: 0 0 8px; font-size: 20px; }
   .admin-muted { color: var(--text-muted, #5C6A61); font-size: 14px; line-height: 1.6; }
-  .admin-topbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 8px; }
+  .admin-topbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 8px; }
   .admin-primary-btn, .admin-secondary-btn {
     font: inherit; cursor: pointer; border-radius: 8px; padding: 10px 16px; font-weight: 600;
   }
@@ -35,8 +43,9 @@
     font-family: monospace; background: var(--bg, #EEF3F0); border: 1px solid var(--border, #DCE3DC);
     border-radius: 8px; padding: 10px 12px; margin: 8px 0 16px; word-break: break-all; font-size: 13px;
   }
-  .admin-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 14px; }
-  .admin-table th, .admin-table td { text-align: left; padding: 8px 10px; border-bottom: 1px dashed var(--border, #DCE3DC); }
+  .admin-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .admin-table th, .admin-table td { text-align: left; padding: 8px 10px; border-bottom: 1px dashed var(--border, #DCE3DC); white-space: nowrap; }
+  .admin-table td:first-child, .admin-table th:first-child { white-space: normal; }
   .admin-link { color: var(--primary-dark, #0A5450); font-weight: 600; text-decoration: none; }
   .admin-link:hover { text-decoration: underline; }
   code { font-family: monospace; }
@@ -65,8 +74,18 @@
   .admin-block-table table { border-collapse: collapse; font-size: 12px; }
   .admin-block-table th, .admin-block-table td { border: 1px solid var(--border, #DCE3DC); padding: 4px 6px; }
   .admin-wishes { margin-top: 6px; }
-  .admin-wish { background: var(--bg, #EEF3F0); border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; font-size: 13px; }
+  .admin-wish { background: var(--bg, #EEF3F0); border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; font-size: 13px; word-break: break-word; }
   .admin-wish-meta { color: var(--text-muted, #5C6A61); font-size: 12px; margin-bottom: 2px; }
+
+  /* 手機版：縮小外圍留白與字體，讓表格捲動區更明顯是「可以左右滑」而不是版面跑掉 */
+  @media (max-width: 600px) {
+    body { padding: 12px 8px; }
+    .admin-card { padding: 16px 14px; border-radius: 10px; }
+    .admin-card h1 { font-size: 18px; }
+    .admin-table th, .admin-table td { padding: 8px; font-size: 13px; }
+    #admin-search { min-width: 0 !important; flex: 1 1 100% !important; }
+    #admin-filter { flex: 1 1 100% !important; }
+  }
 </style>
 </head>
 <body>
