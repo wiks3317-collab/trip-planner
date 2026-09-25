@@ -139,19 +139,21 @@ function dashboardShellHtml(user) {
       </p>
       <div class="admin-row-actions" style="margin:8px 0;"><input id="admin-search" type="search" placeholder="搜尋行程名稱或 ID" style="flex:1;min-width:160px;padding:8px 10px;border:1px solid var(--border,#DCE3DC);border-radius:8px;font:inherit;"><select id="admin-filter" style="padding:8px;border-radius:8px;border:1px solid var(--border,#DCE3DC);font:inherit;"><option value="all">全部</option><option value="active">啟用中</option><option value="disabled">已停用</option><option value="deleted">已刪除</option></select></div>
       <div id="admin-trips-status" class="admin-muted hidden"></div>
-      <table class="admin-table" id="admin-trips-table">
-        <thead>
-          <tr>
-            <th>行程名稱</th>
-            <th>成員數</th>
-            <th>建立時間</th>
-            <th>狀態</th>
-            <th>行程 ID</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody id="admin-trips-tbody"></tbody>
-      </table>
+      <div class="admin-table-scroll">
+        <table class="admin-table" id="admin-trips-table">
+          <thead>
+            <tr>
+              <th>行程名稱</th>
+              <th>成員數</th>
+              <th>建立時間</th>
+              <th>狀態</th>
+              <th>行程 ID</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="admin-trips-tbody"></tbody>
+        </table>
+      </div>
     </div>
   `;
 }
@@ -179,12 +181,12 @@ function renderTripsTable() {
     (!kw || (t.name || "").toLowerCase().includes(kw) || t.id.toLowerCase().includes(kw)));
   tbodyEl.innerHTML = rows.map((t) => `
     <tr>
-      <td>${escapeHtml(t.name || "（未命名）")}<div class="admin-muted" style="font-size:12px;">統籌人：${escapeHtml(ownerNames(t))}</div></td>
-      <td>${Array.isArray(t.members) ? t.members.length : "—"}</td>
-      <td>${fmtDate(t.createdAt)}</td>
-      <td>${t.deleted === true ? '<span class="admin-badge admin-badge-disabled">已刪除</span>' : t.disabled === true ? '<span class="admin-badge admin-badge-disabled">已停用</span>' : '<span class="admin-badge admin-badge-active">啟用中</span>'}</td>
-      <td><code>${escapeHtml(t.id)}</code></td>
-      <td class="admin-row-actions">
+      <td data-label="行程名稱">${escapeHtml(t.name || "（未命名）")}<div class="admin-muted" style="font-size:12px;">統籌人：${escapeHtml(ownerNames(t))}</div></td>
+      <td data-label="成員數">${Array.isArray(t.members) ? t.members.length : "—"}</td>
+      <td data-label="建立時間">${fmtDate(t.createdAt)}</td>
+      <td data-label="狀態">${t.deleted === true ? '<span class="admin-badge admin-badge-disabled">已刪除</span>' : t.disabled === true ? '<span class="admin-badge admin-badge-disabled">已停用</span>' : '<span class="admin-badge admin-badge-active">啟用中</span>'}</td>
+      <td data-label="行程 ID"><code>${escapeHtml(t.id)}</code></td>
+      <td data-label="操作" class="admin-row-actions">
         <button class="admin-link-btn" data-action="detail" data-tripid="${escapeHtml(t.id)}">檢視內容</button>
         <a class="admin-link" href="./index.html#/trip/${encodeURIComponent(t.id)}" target="_blank" rel="noopener">開啟行程 →</a>
         ${t.deleted === true ? "" : `<button class="admin-link-btn admin-danger" data-action="toggle" data-tripid="${escapeHtml(t.id)}">${t.disabled === true ? "恢復啟用" : "停用"}</button>`}
@@ -322,7 +324,7 @@ function renderMembersSection(trip) {
         <tbody>
           ${members.map((m) => {
             const uids = Array.isArray(m.uids) ? m.uids : (m.uid ? [m.uid] : []);
-            return `<tr><td>${escapeHtml(m.name || "（未命名）")}</td><td>${escapeHtml(permissionLabel(m.permission))}</td><td><code style="font-size:11px;">${uids.map(escapeHtml).join("<br>") || "—"}</code></td></tr>`;
+            return `<tr><td data-label="名稱">${escapeHtml(m.name || "（未命名）")}</td><td data-label="權限">${escapeHtml(permissionLabel(m.permission))}</td><td data-label="綁定 UID"><code style="font-size:11px;">${uids.map(escapeHtml).join("<br>") || "—"}</code></td></tr>`;
           }).join("")}
         </tbody>
       </table></div>
@@ -428,13 +430,13 @@ async function showTripDetail(tripId) {
             <tbody>
               ${tree.expenses.map((e) => `
                 <tr>
-                  <td>${escapeHtml(e.date || "")}</td>
-                  <td>${escapeHtml(e.title || "")}</td>
-                  <td>${fmtMoney(e.amountCents)} ${escapeHtml(e.currency || "")}</td>
-                  <td>${escapeHtml(memberNameById[e.payerId] || e.payerId || "")}</td>
-                  <td>${(e.splitWith || []).map((id) => escapeHtml(memberNameById[id] || id)).join("、")}</td>
-                  <td>${escapeHtml(e.note || "")}</td>
-                  ${adminCanEdit ? `<td>${btn("exp-del", "刪除", { exp: e.id }, true)}</td>` : ""}
+                  <td data-label="日期">${escapeHtml(e.date || "")}</td>
+                  <td data-label="項目">${escapeHtml(e.title || "")}</td>
+                  <td data-label="金額">${fmtMoney(e.amountCents)} ${escapeHtml(e.currency || "")}</td>
+                  <td data-label="付款人">${escapeHtml(memberNameById[e.payerId] || e.payerId || "")}</td>
+                  <td data-label="分攤對象">${(e.splitWith || []).map((id) => escapeHtml(memberNameById[id] || id)).join("、")}</td>
+                  <td data-label="備註">${escapeHtml(e.note || "")}</td>
+                  ${adminCanEdit ? `<td data-label="操作">${btn("exp-del", "刪除", { exp: e.id }, true)}</td>` : ""}
                 </tr>
               `).join("")}
             </tbody>
@@ -524,7 +526,7 @@ async function showAuditLog() {
         <p class="admin-muted">最近 ${logs.length} 筆管理員操作（只能新增、不能修改或刪除）。</p>
         <div class="admin-table-scroll"><table class="admin-table">
           <thead><tr><th>時間</th><th>管理員</th><th>動作</th><th>行程 ID</th><th>內容</th></tr></thead>
-          <tbody>${logs.map((l) => `<tr><td>${fmtDate(l.createdAt)}</td><td>${escapeHtml(l.adminEmail || l.adminUid || "")}</td><td>${escapeHtml(l.action || "")}</td><td><code>${escapeHtml(l.tripId || "")}</code></td><td style="font-size:12px;max-width:220px;white-space:normal;word-break:break-all;">${escapeHtml(JSON.stringify(l.detail || {}))}</td></tr>`).join("")}</tbody>
+          <tbody>${logs.map((l) => `<tr><td data-label="時間">${fmtDate(l.createdAt)}</td><td data-label="管理員">${escapeHtml(l.adminEmail || l.adminUid || "")}</td><td data-label="動作">${escapeHtml(l.action || "")}</td><td data-label="行程 ID"><code>${escapeHtml(l.tripId || "")}</code></td><td data-label="內容" style="font-size:12px;max-width:220px;white-space:normal;word-break:break-all;">${escapeHtml(JSON.stringify(l.detail || {}))}</td></tr>`).join("")}</tbody>
         </table></div>
       </div>
     `);
