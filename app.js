@@ -270,6 +270,7 @@ const state = {
   expenses: [],
   tripSection: "itinerary", // 'itinerary' | 'expenses'
   openedViaInvite: false, // 是否由邀請連結進入
+  inviteCode: null, // 透過哪一組邀請連結代碼進入（用來計算該連結的使用次數）
   unsub: {},             // active onSnapshot unsubscribe fns, keyed
 };
 
@@ -502,6 +503,7 @@ async function resolveTripShortCode(code) {
     return;
   }
   state.openedViaInvite = data.type === "tripInvite";
+  state.inviteCode = data.type === "tripInvite" ? code : null;
   navigate(`#/trip/${data.tripId}`);
 }
 
@@ -607,7 +609,8 @@ async function createEditAccessRequest() {
   }
 
   if (existing.exists()) {
-    // 既有申請只更新必要欄位，避免 setDoc 覆寫並刪除歷史審核欄位。
+    // 既有申請只更新必要欄位，避免 setDoc 覆寫並刪除歷史審核欄位；
+    // 原本記錄的 inviteCode 保留不動（Rules 也只允許改 status/createdAt）。
     await updateDoc(requestRef, {
       status: "pending",
       createdAt: serverTimestamp(),
@@ -617,6 +620,7 @@ async function createEditAccessRequest() {
       requestedUid: uid,
       status: "pending",
       createdAt: serverTimestamp(),
+      inviteCode: state.openedViaInvite ? (state.inviteCode || null) : null,
     });
   }
   toast("已送出編輯權限申請，請通知統籌人審核");
@@ -1000,7 +1004,7 @@ document.getElementById("share-btn").addEventListener("click", () => {
 // trips/{tripId}/inviteLinks/{code} 是給統籌人在「管理成員與權限」列出/管理自己行程邀請連結用的鏡像資料。
 // 兩份用同一組 code 當文件 ID，撤銷／改期限時會同時更新。
 // ------------------------------------------------------------
-async function createTripInviteLink({ label, expiresAt } = {}) {
+async function createTripInviteLink({ label, expiresAt, maxUses } = {}) {
   const tripId = state.tripId;
   const uid = currentUid();
   for (let i = 0; i < 6; i++) {
@@ -1013,9 +1017,9 @@ async function createTripInviteLink({ label, expiresAt } = {}) {
       createdBy: uid,
       expiresAt: expiresAt ? Timestamp.fromDate(expiresAt) : null,
       revoked: false,
-      // 目前邀請連結採「可重複開啟、由統籌人撤銷」模式；
-      // maxUses/usedCount 預留給後端原子兌換流程，前端不自行遞增使用次數。
-      maxUses: null,
+      // 次數上限預設無限（null），由統籌人手動調整；核准編輯權限申請時前端會核對已核准人數，
+      // 不是靠訪客端自行遞增計數，所以不需要後端也能可靠地擋住超過次數的核准。
+      maxUses: maxUses || null,
       usedCount: 0,
     };
     try {
@@ -1060,6 +1064,22 @@ async function setInviteLinkExpiry(code, expiresAtDateOrNull) {
   batch.update(doc(db, "shortlinks", code), { expiresAt: value });
   batch.update(doc(db, "trips", state.tripId, "inviteLinks", code), { expiresAt: value });
   await batch.commit();
+}
+
+// 次數上限：留空／null 代表無限次，統籌人可隨時調整，跟到期時間走同一套「手動調整」邏輯。
+async function setInviteLinkMaxUses(code, maxUsesOrNull) {
+  const batch = writeBatch(db);
+  batch.update(doc(db, "shortlinks", code), { maxUses: maxUsesOrNull });
+  batch.update(doc(db, "trips", state.tripId, "inviteLinks", code), { maxUses: maxUsesOrNull });
+  await batch.commit();
+}
+
+// 核准編輯權限申請時用：算出某組邀請連結目前已核准（含這筆申請本身以外）的次數。
+// 因為訪客端沒有寫入 access 的權限，「核准」永遠要統籌人手動按下，所以在核准當下用最新資料核對次數上限，
+// 已經足夠可靠，不需要額外的後端服務。
+function approvedCountForCode(allRequests, code, excludeRequestId) {
+  if (!code) return 0;
+  return allRequests.filter((r) => r.inviteCode === code && r.status === "approved" && r.id !== excludeRequestId).length;
 }
 
 function inviteLinkStatus(link) {
@@ -3110,20 +3130,26 @@ function renderManageMembersModal() {
       listWrap.innerHTML = `<p style="color:var(--text-muted);font-size:13px;">目前沒有任何邀請連結。</p>`;
       return;
     }
+    const allRequests = await loadAccessRequests().catch(() => []);
     listWrap.innerHTML = links.map((link) => {
       const status = inviteLinkStatus(link);
       const inviteUrl = `${window.location.origin}${window.location.pathname}#/s/${link.id}`;
+      const usedCount = approvedCountForCode(allRequests, link.id, null);
+      const usageText = link.maxUses ? `已核准 ${usedCount} ／ ${link.maxUses} 次` : `已核准 ${usedCount} 次（無限制）`;
       return `
         <div class="invite-link-card" data-invite-code="${link.id}">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
             <strong style="font-size:13px;">${escapeHtml(link.label || "（未命名連結）")}</strong>
             <span class="status-tag status-${status}">${inviteLinkStatusLabel(status)}</span>
           </div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${escapeHtml(usageText)}</div>
           <input type="text" readonly value="${escapeHtml(inviteUrl)}" onclick="this.select()" style="width:100%;margin-top:6px;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
           <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px;">
             <button class="secondary-btn small-btn copy-invite-btn" data-url="${escapeHtml(inviteUrl)}">📋 複製</button>
             <input type="datetime-local" class="invite-expiry-input" data-code="${link.id}" value="${toDatetimeLocalValue(link.expiresAt)}" style="padding:6px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;" ${status === "revoked" ? "disabled" : ""}>
             <button class="secondary-btn small-btn save-invite-expiry-btn" data-code="${link.id}" ${status === "revoked" ? "disabled" : ""}>更新到期時間</button>
+            <input type="number" min="1" max="10000" class="invite-maxuses-input" data-code="${link.id}" value="${link.maxUses || ""}" placeholder="次數上限" style="width:110px;padding:6px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;" ${status === "revoked" ? "disabled" : ""}>
+            <button class="secondary-btn small-btn save-invite-maxuses-btn" data-code="${link.id}" ${status === "revoked" ? "disabled" : ""}>更新次數上限</button>
             ${status === "revoked"
               ? `<button class="secondary-btn small-btn restore-invite-btn" data-code="${link.id}">恢復啟用</button>`
               : `<button class="danger-btn small-btn revoke-invite-btn" data-code="${link.id}">撤銷</button>`}
@@ -3142,6 +3168,24 @@ function renderManageMembersModal() {
         try {
           await setInviteLinkExpiry(btn.dataset.code, dateValue);
           toast(dateValue ? "已更新到期時間" : "已設為永久有效");
+          await renderInviteLinksList();
+        } catch (err) {
+          console.error(err);
+          toast("更新失敗，請稍後再試");
+          btn.disabled = false;
+        }
+      });
+    });
+    listWrap.querySelectorAll(".save-invite-maxuses-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const input = listWrap.querySelector(`.invite-maxuses-input[data-code="${btn.dataset.code}"]`);
+        const raw = input.value.trim();
+        const value = raw ? Math.max(1, Math.min(10000, parseInt(raw, 10) || 0)) : null;
+        if (raw && !value) return toast("次數上限請輸入正整數");
+        btn.disabled = true;
+        try {
+          await setInviteLinkMaxUses(btn.dataset.code, value);
+          toast(value ? "已更新次數上限" : "已設為無限次");
           await renderInviteLinksList();
         } catch (err) {
           console.error(err);
@@ -3187,25 +3231,30 @@ function renderManageMembersModal() {
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;">
         <input type="text" id="new-invite-label" placeholder="連結用途（選填，例如：家族群組）" style="flex:1;min-width:140px;padding:8px;border:1px solid var(--border);border-radius:8px;font-size:13px;">
         <input type="datetime-local" id="new-invite-expiry" style="padding:8px;border:1px solid var(--border);border-radius:8px;font-size:13px;">
+        <input type="number" min="1" max="10000" id="new-invite-maxuses" placeholder="次數上限（留空=無限）" style="width:150px;padding:8px;border:1px solid var(--border);border-radius:8px;font-size:13px;">
         <button class="primary-btn small-btn" id="create-invite-btn">＋ 建立邀請連結</button>
       </div>
-      <p style="font-size:11px;color:var(--text-muted);margin:0 0 10px;">到期時間留空表示永久有效；建立後仍可隨時回來調整期限或撤銷，也可以同時建立多組（例如分別給不同群組）。</p>
+      <p style="font-size:11px;color:var(--text-muted);margin:0 0 10px;">到期時間與次數上限都留空表示無限制；建立後仍可隨時回來調整，也可以同時建立多組（例如分別給不同群組）。</p>
       <div id="invite-links-list"><p style="color:var(--text-muted);font-size:13px;">載入中...</p></div>
     `;
     document.getElementById("create-invite-btn").addEventListener("click", async () => {
       const btn = document.getElementById("create-invite-btn");
       const label = document.getElementById("new-invite-label").value;
       const expiresAt = parseDatetimeLocal(document.getElementById("new-invite-expiry").value);
+      const maxUsesRaw = document.getElementById("new-invite-maxuses").value.trim();
+      const maxUses = maxUsesRaw ? Math.max(1, Math.min(10000, parseInt(maxUsesRaw, 10) || 0)) : null;
+      if (maxUsesRaw && !maxUses) return toast("次數上限請輸入正整數");
       btn.disabled = true;
       btn.textContent = "建立中...";
       try {
-        const result = await createTripInviteLink({ label, expiresAt });
+        const result = await createTripInviteLink({ label, expiresAt, maxUses });
         if (!result.code) {
           toast(shortlinkErrorMessage(result.error));
         } else {
           toast("已建立邀請連結");
           document.getElementById("new-invite-label").value = "";
           document.getElementById("new-invite-expiry").value = "";
+          document.getElementById("new-invite-maxuses").value = "";
           await renderInviteLinksList();
         }
       } catch (err) {
@@ -3243,29 +3292,40 @@ function renderManageMembersModal() {
   (async () => {
     const wrap = document.getElementById("access-requests-wrap");
     try {
-      const requests = (await loadAccessRequests()).filter((r) => r.status === "pending");
+      const allRequests = await loadAccessRequests();
+      const requests = allRequests.filter((r) => r.status === "pending");
       if (!requests.length) {
         wrap.innerHTML = `<p style="color:var(--text-muted);font-size:13px;">目前沒有待審核申請。</p>`;
         return;
       }
+      const links = (await loadInviteLinks()) || [];
+      const linkByCode = Object.fromEntries(links.map((l) => [l.id, l]));
       const candidates = members.filter((m) => m.permission !== "owner");
-      wrap.innerHTML = requests.map((r) => `
+      wrap.innerHTML = requests.map((r) => {
+        const link = r.inviteCode ? linkByCode[r.inviteCode] : null;
+        const approvedSoFar = approvedCountForCode(allRequests, r.inviteCode, r.id);
+        const atCap = link?.maxUses ? approvedSoFar >= link.maxUses : false;
+        return `
         <div class="card" style="padding:10px;margin-bottom:8px;">
           <div style="font-size:12px;word-break:break-all;">UID：${escapeHtml(r.requestedUid)}</div>
+          ${link ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">來源連結：${escapeHtml(link.label || "（未命名連結）")}${link.maxUses ? `　已核准 ${approvedSoFar} ／ ${link.maxUses} 次` : ""}</div>` : ""}
+          ${atCap ? `<div style="font-size:11px;color:var(--danger);margin-top:2px;">⚠️ 這組連結已達你設定的次數上限，核准前會再次跟你確認。</div>` : ""}
           <div style="display:flex;gap:6px;align-items:center;margin-top:8px;">
             <select data-request-member="${r.id}" style="flex:1;padding:8px;border:1px solid var(--border);border-radius:8px;">
               <option value="">選擇要綁定的成員</option>
               ${candidates.map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)}（${permLabel(m.permission)}）</option>`).join("")}
             </select>
-            <button class="primary-btn small-btn" data-approve-request="${r.id}">核准</button>
+            <button class="primary-btn small-btn" data-approve-request="${r.id}" data-atcap="${atCap ? "1" : "0"}">核准</button>
             <button class="secondary-btn small-btn" data-reject-request="${r.id}">拒絕</button>
           </div>
-        </div>`).join("");
+        </div>`;
+      }).join("");
       wrap.querySelectorAll("[data-approve-request]").forEach((btn) => {
         btn.onclick = async () => {
           const req = requests.find((r) => r.id === btn.dataset.approveRequest);
           const select = wrap.querySelector(`[data-request-member="${req.id}"]`);
           if (!select.value) return toast("請先選擇要綁定的成員");
+          if (btn.dataset.atcap === "1" && !confirm("這組邀請連結已達你設定的次數上限，仍要核准這筆申請嗎？（也可以先去下方調高次數上限）")) return;
           try {
             btn.disabled = true;
             await approveAccessRequest(req.id, req.requestedUid, select.value);
