@@ -4,7 +4,7 @@
 // 把下面的設定值換成你自己的（在 Firebase 主控台 > 專案設定 > 你的應用程式 可以找到）
 // ============================================================
 
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+import { initializeApp, getApps, getApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
 import {
   getFirestore,
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
@@ -14,9 +14,9 @@ import {
   onAuthStateChanged,
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
 
-import { firebaseConfig } from "./firebase-options.js?v=21p3fix2"; // 設定值集中在 firebase-options.js
+import { firebaseConfig } from "./firebase-options.js"; // 設定值集中在 firebase-options.js
 
-const app = initializeApp(firebaseConfig);
+const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 const db = getFirestore(app);
 const auth = getAuth(app);
 

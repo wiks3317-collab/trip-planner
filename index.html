@@ -74,27 +74,19 @@
   <!-- Toast 提示 -->
   <div id="toast-container"></div>
 
-  <!-- v21p3 修正版 2：由單一 bootstrap 入口載入 app.js，避免 Firebase 模組因 query 版本不同而被初始化兩次 -->
-  <script type="module">
-    const showBootstrapError = (err) => {
-      console.error("[bootstrap] 網站程式載入失敗", err);
+  <!-- v21p3 Fix 3：使用單一標準 module 入口；Firebase 初始化可安全重用既有 app。 -->
+  <script>
+    window.addEventListener("error", (event) => {
+      console.error("[runtime]", event.error || event.message);
       const root = document.getElementById("app-root");
-      if (!root) return;
-      const detail = err?.code ? `（${err.code}）` : "";
-      root.innerHTML = `
-        <div class="card" style="text-align:center;padding:36px 20px;">
-          <h3 style="margin-top:0;">⚠️ 網站程式載入失敗${detail}</h3>
-          <p style="color:var(--text-muted);">程式初始化時發生錯誤。請先重新整理；若仍發生，請將這個畫面截圖給管理者檢查。</p>
-          <button class="primary-btn" id="bootstrap-reload-btn">重新整理</button>
-        </div>`;
-      document.getElementById("bootstrap-reload-btn")?.addEventListener("click", () => location.reload());
-    };
-
-    try {
-      await import("./app.js?v=21p3fix2");
-    } catch (err) {
-      showBootstrapError(err);
-    }
+      if (!root || root.dataset.runtimeErrorShown === "1") return;
+      root.dataset.runtimeErrorShown = "1";
+      root.innerHTML = `<div class="card" style="text-align:center;padding:36px 20px;"><h3 style="margin-top:0;">⚠️ 網站程式載入失敗</h3><p style="color:var(--text-muted);">程式初始化時發生錯誤。</p><p style="font-size:12px;color:var(--text-muted);word-break:break-word;">${String(event.error?.message || event.message || "未知錯誤").replace(/</g,"&lt;")}</p><button class="primary-btn" onclick="location.reload()">重新整理</button></div>`;
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      console.error("[unhandledrejection]", event.reason);
+    });
   </script>
+  <script type="module" src="app.js?v=21p3fix3"></script>
 </body>
 </html>
