@@ -654,7 +654,10 @@ async function loadAccessRequests() {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }
 
-async function approveAccessRequest(requestId, requestedUid, memberId) {
+// options.overrideCap：統籌人在畫面上確認「已達次數上限仍要核准」後，帶 true 重新呼叫一次。
+// 次數上限的判斷與遞增都在同一個 Transaction 內完成（見下方 shortlinkRef／mirrorRef），
+// 避免兩筆申請「同時」被核准時各自依據舊的 usedCount 誤判成「還沒到上限」而一起超額通過。
+async function approveAccessRequest(requestId, requestedUid, memberId, { overrideCap = false } = {}) {
   if (!state.tripId || !requestedUid || !memberId) {
     throw new Error("缺少核准申請所需資料");
   }
@@ -668,6 +671,29 @@ async function approveAccessRequest(requestId, requestedUid, memberId) {
     if (request.status !== "pending" || request.requestedUid !== requestedUid) {
       throw new Error("這筆申請已被處理，請重新整理後再試");
     }
+
+    // 邀請連結次數上限：Transaction 內原子讀取 shortlinks/{code}（與其鏡像 inviteLinks/{code}）
+    // 目前的 usedCount，跟這次核准的寫入放在同一個交易，讀到的一定是最新資料。
+    let shortlinkRef = null;
+    let mirrorRef = null;
+    let shortlinkSnap = null;
+    let mirrorSnap = null;
+    if (request.inviteCode) {
+      shortlinkRef = doc(db, "shortlinks", request.inviteCode);
+      mirrorRef = doc(db, "trips", state.tripId, "inviteLinks", request.inviteCode);
+      [shortlinkSnap, mirrorSnap] = await Promise.all([tx.get(shortlinkRef), tx.get(mirrorRef)]);
+      if (shortlinkSnap.exists()) {
+        const linkData = shortlinkSnap.data();
+        const currentUsed = linkData.usedCount || 0;
+        const atCap = linkData.maxUses != null && currentUsed >= linkData.maxUses;
+        if (atCap && !overrideCap) {
+          const capError = new Error("這組邀請連結已達使用次數上限");
+          capError.capReached = true;
+          throw capError;
+        }
+      }
+    }
+
     const latestMembers = (trip.members || []).map((m) => ({ ...m }));
     const latestTarget = latestMembers.find((m) => m.id === memberId);
     if (!latestTarget || latestTarget.permission === "owner") throw new Error("找不到可綁定的成員");
@@ -679,6 +705,13 @@ async function approveAccessRequest(requestId, requestedUid, memberId) {
     latestMembers.forEach((m) => memberUids(m).forEach((u) => { if (u) access[u] = m.permission; }));
     tx.update(tripRef, { members: latestMembers, access, authModelVersion: 2 });
     tx.update(requestRef, { status: "approved", approvedMemberId: memberId, approvedAt: serverTimestamp() });
+
+    if (shortlinkRef && shortlinkSnap.exists()) {
+      tx.update(shortlinkRef, { usedCount: (shortlinkSnap.data().usedCount || 0) + 1 });
+    }
+    if (mirrorRef && mirrorSnap.exists()) {
+      tx.update(mirrorRef, { usedCount: (mirrorSnap.data().usedCount || 0) + 1 });
+    }
   });
 }
 
@@ -1075,14 +1108,6 @@ async function setInviteLinkMaxUses(code, maxUsesOrNull) {
   batch.update(doc(db, "shortlinks", code), { maxUses: maxUsesOrNull });
   batch.update(doc(db, "trips", state.tripId, "inviteLinks", code), { maxUses: maxUsesOrNull });
   await batch.commit();
-}
-
-// 核准編輯權限申請時用：算出某組邀請連結目前已核准（含這筆申請本身以外）的次數。
-// 因為訪客端沒有寫入 access 的權限，「核准」永遠要統籌人手動按下，所以在核准當下用最新資料核對次數上限，
-// 已經足夠可靠，不需要額外的後端服務。
-function approvedCountForCode(allRequests, code, excludeRequestId) {
-  if (!code) return 0;
-  return allRequests.filter((r) => r.inviteCode === code && r.status === "approved" && r.id !== excludeRequestId).length;
 }
 
 function inviteLinkStatus(link) {
@@ -3118,11 +3143,10 @@ function renderManageMembersModal() {
       listWrap.innerHTML = `<p style="color:var(--text-muted);font-size:13px;">目前沒有任何邀請連結。</p>`;
       return;
     }
-    const allRequests = await loadAccessRequests().catch(() => []);
     listWrap.innerHTML = links.map((link) => {
       const status = inviteLinkStatus(link);
       const inviteUrl = `${window.location.origin}${window.location.pathname}#/s/${link.id}`;
-      const usedCount = approvedCountForCode(allRequests, link.id, null);
+      const usedCount = link.usedCount || 0;
       const usageText = link.maxUses ? `已核准 ${usedCount} ／ ${link.maxUses} 次` : `已核准 ${usedCount} 次（無限制）`;
       return `
         <div class="invite-link-card" data-invite-code="${link.id}">
@@ -3284,7 +3308,9 @@ function renderManageMembersModal() {
       const candidates = members.filter((m) => m.permission !== "owner");
       wrap.innerHTML = requests.map((r) => {
         const link = r.inviteCode ? linkByCode[r.inviteCode] : null;
-        const approvedSoFar = approvedCountForCode(allRequests, r.inviteCode, r.id);
+        // 顯示用：讀 usedCount（已用 Transaction 原子維護），僅供參考；核准當下是否真的達到上限，
+        // 一律以 approveAccessRequest() 在 Transaction 內重新讀到的最新資料為準。
+        const approvedSoFar = link?.usedCount || 0;
         const atCap = link?.maxUses ? approvedSoFar >= link.maxUses : false;
         return `
         <div class="card" style="padding:10px;margin-bottom:8px;">
@@ -3296,7 +3322,7 @@ function renderManageMembersModal() {
               <option value="">選擇要綁定的成員</option>
               ${candidates.map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)}（${permLabel(m.permission)}）</option>`).join("")}
             </select>
-            <button class="primary-btn small-btn" data-approve-request="${r.id}" data-atcap="${atCap ? "1" : "0"}">核准</button>
+            <button class="primary-btn small-btn" data-approve-request="${r.id}">核准</button>
             <button class="secondary-btn small-btn" data-reject-request="${r.id}">拒絕</button>
           </div>
         </div>`;
@@ -3306,13 +3332,30 @@ function renderManageMembersModal() {
           const req = requests.find((r) => r.id === btn.dataset.approveRequest);
           const select = wrap.querySelector(`[data-request-member="${req.id}"]`);
           if (!select.value) return toast("請先選擇要綁定的成員");
-          if (btn.dataset.atcap === "1" && !confirm("這組邀請連結已達你設定的次數上限，仍要核准這筆申請嗎？（也可以先去下方調高次數上限）")) return;
           try {
             btn.disabled = true;
             await approveAccessRequest(req.id, req.requestedUid, select.value);
             toast("已核准編輯權限，請通知對方重新整理");
             closeModal();
           } catch (err) {
+            // 次數上限的判斷在 Transaction 內用最新資料重新核對，這裡才是唯一可信的「已達上限」時機；
+            // 跳出確認後若統籌人仍要核准，會帶 overrideCap 重新呼叫一次。
+            if (err && err.capReached) {
+              const wantsOverride = confirm("這組邀請連結已達次數上限，仍要核准這筆申請嗎？（也可以先去下方調高次數上限）");
+              if (wantsOverride) {
+                try {
+                  await approveAccessRequest(req.id, req.requestedUid, select.value, { overrideCap: true });
+                  toast("已核准編輯權限，請通知對方重新整理");
+                  closeModal();
+                  return;
+                } catch (err2) {
+                  console.error(err2);
+                  toast("核准失敗，請確認規則及成員資料");
+                }
+              }
+              btn.disabled = false;
+              return;
+            }
             console.error(err);
             toast("核准失敗，請確認規則及成員資料");
             btn.disabled = false;

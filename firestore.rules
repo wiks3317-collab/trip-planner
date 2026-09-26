@@ -338,6 +338,11 @@ service cloud.firestore {
           && request.resource.data.createdBy == resource.data.createdBy
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revoked', 'expiresAt', 'label', 'maxUses', 'updatedAt'])
           && validInvite(request.resource.data, tripId);
+        // v21p4：跟 shortlinks/{code} 同一組邀請連結的鏡像資料，usedCount 也要能在核准 Transaction 內
+        // 同步原子遞增，維持兩份資料一致；同樣只允許「只改 usedCount 且新值等於舊值 +1」。
+        allow update: if isOwner(tripId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['usedCount'])
+          && request.resource.data.usedCount == resource.data.get('usedCount', 0) + 1;
         allow delete: if isOwner(tripId) || isAdminEditor();
       }
 
@@ -418,6 +423,14 @@ service cloud.firestore {
         && request.resource.data.createdBy == resource.data.createdBy
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revoked', 'expiresAt', 'label', 'maxUses', 'updatedAt'])
         && validInvite(request.resource.data, resource.data.tripId);
+      // v21p4：核准編輯權限申請時，由統籌人在同一個 Transaction 內原子讀取並遞增 usedCount，
+      // 避免多筆申請同時核准時各自依據舊資料誤判「還沒達到次數上限」而一起超額通過。
+      // 只允許「僅改 usedCount 且新值剛好等於舊值 +1」，不能藉此管道改動其他欄位或一次跳增多筆。
+      allow update: if signedIn()
+        && resource.data.type == 'tripInvite'
+        && isOwner(resource.data.tripId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['usedCount'])
+        && request.resource.data.usedCount == resource.data.get('usedCount', 0) + 1;
       // 邀請連結可由該行程統籌人刪除；系統管理員的 canEdit 權限可清理已知的舊版 6 碼邀請／同步代碼。
       // sync 代碼沒有 tripId，因此管理員只能透過已知代碼 get + delete，不能 list 全部 shortlinks，避免暴露其他使用者的跨裝置同步資料。
       allow delete: if signedIn()
