@@ -312,14 +312,14 @@ async function commitWithAudit(tripId, action, detail, build) {
 }
 
 function canonicalMemberSnapshot(members) {
-  return (Array.isArray(members) ? members : []).map((m) => {
-    const uids = memberUidList(m);
-    return {
-      ...m,
-      uids,
-      uid: uids[0] || null,
-    };
-  }).sort((a, b) => String(a.id || "").localeCompare(String(b.id || "")));
+  // 只比較「成員編輯器實際管理」的欄位，避免 Firestore 中其他無關欄位、
+  // 欄位順序或舊資料格式差異造成假的 MEMBERS_CONFLICT。
+  return (Array.isArray(members) ? members : []).map((m) => ({
+    id: String(m?.id || ""),
+    name: String(m?.name || ""),
+    permission: String(m?.permission || ""),
+    uids: memberUidList(m),
+  })).sort((a, b) => a.id.localeCompare(b.id));
 }
 
 function sameMemberSnapshot(a, b) {
@@ -739,7 +739,9 @@ async function openMemberEditor(tripId) {
   }
   memberDraft = {
     tripId, trip,
-    origJson: JSON.stringify(trip.members || []),
+    // 儲存正規化快照，而不是直接保存 Firestore 原始 JSON。
+    // 這可避免舊資料欄位順序／uid 與 uids 共存等格式差異造成誤判。
+    origJson: JSON.stringify(canonicalMemberSnapshot(trip.members || [])),
     members: (trip.members || []).map((m) => ({ ...m, uids: memberUidList(m) })),
   };
   renderMemberEditor();
