@@ -74,7 +74,24 @@
   <!-- Toast 提示 -->
   <div id="toast-container"></div>
 
-  <script type="module" src="firebase-config.js"></script>
-  <script type="module" src="app.js"></script>
+  <!-- v21p3 修正版：模組載入失敗時不要讓畫面永久停在「載入中」 -->
+  <script>
+    window.addEventListener("error", function (event) {
+      console.error("[bootstrap] JavaScript 載入／執行錯誤", event.error || event.message);
+      var root = document.getElementById("app-root");
+      if (root && root.querySelector("#loading-screen")) {
+        root.innerHTML = '<div class="card" style="text-align:center;padding:36px 20px;">' +
+          '<h3 style="margin-top:0;">⚠️ 網站程式載入失敗</h3>' +
+          '<p style="color:var(--text-muted);">請重新整理頁面。若持續發生，可能是瀏覽器快取或 Firebase 程式設定造成。</p>' +
+          '<button class="primary-btn" onclick="location.reload()">重新整理</button>' +
+          '</div>';
+      }
+    });
+    window.addEventListener("unhandledrejection", function (event) {
+      console.error("[bootstrap] 未處理的 Promise 錯誤", event.reason);
+    });
+  </script>
+  <script type="module" src="firebase-config.js?v=21p3fix1"></script>
+  <script type="module" src="app.js?v=21p3fix1"></script>
 </body>
 </html>
