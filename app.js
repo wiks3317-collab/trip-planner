@@ -530,19 +530,15 @@ async function loadTrip(tripId) {
   try {
     snap = await getDoc(tripRef);
   } catch (err) {
-    console.error("[trip] 載入行程失敗", err);
     if (err?.code === "permission-denied") {
-      // v21p3：未綁定 UID 的使用者本來就無權讀取 trip 主文件。
-      // 不再導回首頁，直接顯示存取門檻；若是從有效邀請連結進入，畫面會提供申請按鈕。
       stopContentSubscriptions();
       hideSpotPanel();
       renderAccessGate();
-      updateHeader();
-      renderTripMenu();
       return;
     }
+    console.error("[trip] 載入行程失敗", err);
     toast("行程載入失敗，請稍後再試");
-    renderLoadError("行程載入失敗", "請重新整理頁面；若仍無法載入，請檢查 Firebase 設定或網路連線。", err);
+    navigate("");
     return;
   }
   if (!snap.exists()) {
@@ -1606,20 +1602,6 @@ function renderWelcome() {
 
 function renderLoading() {
   document.getElementById("app-root").innerHTML = `<div id="loading-screen"><p>載入中...</p></div>`;
-}
-
-function renderLoadError(title, message, err = null) {
-  const root = document.getElementById("app-root");
-  const code = err?.code ? `（${escapeHtml(err.code)}）` : "";
-  root.innerHTML = `
-    <div class="card" style="text-align:center;padding:36px 20px;">
-      <h3 style="margin-top:0;">⚠️ ${escapeHtml(title)}${code}</h3>
-      <p style="color:var(--text-muted);">${escapeHtml(message)}</p>
-      <button id="reload-app-btn" class="primary-btn">重新整理</button>
-      <button id="back-home-btn" class="secondary-btn" style="margin-left:6px;">回首頁</button>
-    </div>`;
-  document.getElementById("reload-app-btn")?.addEventListener("click", () => location.reload());
-  document.getElementById("back-home-btn")?.addEventListener("click", () => navigate(""));
 }
 
 // ------------------------------------------------------------
@@ -3379,31 +3361,6 @@ function renderManageMembersModal() {
 // ------------------------------------------------------------
 // 啟動
 // ------------------------------------------------------------
-let startupFinished = false;
-const STARTUP_TIMEOUT_MS = 12000;
-
-Promise.race([
-  authReady,
-  new Promise((resolve) => setTimeout(() => resolve(null), STARTUP_TIMEOUT_MS)),
-]).then((user) => {
-  startupFinished = true;
-  if (!user) {
-    console.error("[startup] Firebase Authentication 未能在期限內完成");
-    renderLoadError(
-      "無法完成 Firebase 登入",
-      "網站需要匿名登入才能讀取你的行程。請確認 Firebase Authentication 已啟用「匿名」登入，然後重新整理。"
-    );
-    return;
-  }
+authReady.then(() => {
   route();
-}).catch((err) => {
-  console.error("[startup] 啟動失敗", err);
-  renderLoadError("網站啟動失敗", "請重新整理頁面；若仍無法載入，請檢查 Firebase 設定。", err);
 });
-
-// 若模組已執行但路由因非預期錯誤中斷，避免畫面永久停在「載入中」。
-setTimeout(() => {
-  if (!startupFinished && document.getElementById("loading-screen")) {
-    renderLoadError("網站載入逾時", "Firebase 登入尚未完成。請重新整理；若持續發生，請檢查 Firebase Authentication 的匿名登入設定。");
-  }
-}, STARTUP_TIMEOUT_MS + 1000);
