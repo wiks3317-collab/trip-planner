@@ -1751,7 +1751,7 @@ function renderTripHome() {
       <button class="tab-btn ${state.tripSection === "itinerary" ? "active" : ""}" id="tab-itinerary">📅 行程</button>
       <button class="tab-btn ${state.tripSection === "expenses" ? "active" : ""}" id="tab-expenses">💰 記帳與分帳</button>
     </div>
-    ${!canEditItinerary() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>你目前是唯讀身份，可以瀏覽行程與記帳內容，並在許願池留言，但無法新增或編輯行程內容與記帳。</span><button class="secondary-btn small-btn" id="request-edit-access-btn">申請編輯權限</button></div>` : "")}
+    ${!canEditItinerary() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>你目前是唯讀身份，可以瀏覽行程與記帳內容，並在許願池留言，但無法新增或編輯行程內容與記帳。</span><button class="secondary-btn small-btn" id="request-edit-access-btn">申請編輯權限</button></div>` : ""}
     <div id="day-selector-wrap"></div>
     <div id="day-content"></div>
   `;
