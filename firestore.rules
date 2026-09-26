@@ -314,10 +314,11 @@ service cloud.firestore {
       // 實際的連結解析（訪客用代碼打開連結）一律以 shortlinks/{code} 那份為準。
       match /inviteLinks/{code} {
         allow get, list: if isOwner(tripId) || isAdmin();
-        allow create: if isOwner(tripId)
+        allow create: if (isOwner(tripId) || (isAdminEditor() && recentlyAuthenticated()))
           && request.resource.data.type == 'tripInvite'
           && request.resource.data.tripId == tripId
           && request.resource.data.revoked == false
+          && request.resource.data.createdBy == request.auth.uid
           && validInvite(request.resource.data, tripId);
         // 只能調整 revoked／expiresAt／label／updatedAt，其餘欄位（含建立者、建立時間、所屬行程）不可被竄改。
         allow update: if (isOwner(tripId) || isAdminEditor())
@@ -391,7 +392,7 @@ service cloud.firestore {
         && (
           (request.resource.data.type == 'tripInvite'
             && request.resource.data.tripId is string
-            && isOwner(request.resource.data.tripId)
+            && (isOwner(request.resource.data.tripId) || (isAdminEditor() && recentlyAuthenticated()))
             && validInvite(request.resource.data, request.resource.data.tripId))
           || validSyncShortlink(request.resource.data)
         );
