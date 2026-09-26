@@ -313,21 +313,21 @@ service cloud.firestore {
       // 因為 shortlinks 集合本身禁止 list（避免被任意列舉代碼），所以另存一份在這裡供管理頁面使用。
       // 實際的連結解析（訪客用代碼打開連結）一律以 shortlinks/{code} 那份為準。
       match /inviteLinks/{code} {
-        allow get, list: if isOwner(tripId);
+        allow get, list: if isOwner(tripId) || isAdmin();
         allow create: if isOwner(tripId)
           && request.resource.data.type == 'tripInvite'
           && request.resource.data.tripId == tripId
           && request.resource.data.revoked == false
           && validInvite(request.resource.data, tripId);
         // 只能調整 revoked／expiresAt／label／updatedAt，其餘欄位（含建立者、建立時間、所屬行程）不可被竄改。
-        allow update: if isOwner(tripId)
+        allow update: if (isOwner(tripId) || isAdminEditor())
           && request.resource.data.type == resource.data.type
           && request.resource.data.tripId == resource.data.tripId
           && request.resource.data.createdAt == resource.data.createdAt
           && request.resource.data.createdBy == resource.data.createdBy
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revoked', 'expiresAt', 'label', 'maxUses', 'updatedAt'])
           && validInvite(request.resource.data, tripId);
-        allow delete: if false;
+        allow delete: if isOwner(tripId) || isAdminEditor();
       }
 
       match /accessRequests/{requestId} {
@@ -341,7 +341,7 @@ service cloud.firestore {
         allow get: if signedIn()
           && (isOwner(tripId)
             || requestId == request.auth.uid);
-        allow list: if isOwner(tripId);
+        allow list: if isOwner(tripId) || isAdmin();
         allow update: if (
             isOwner(tripId)
             && request.resource.data.requestedUid == resource.data.requestedUid
@@ -399,14 +399,18 @@ service cloud.firestore {
       // 其餘欄位（所屬行程、建立時間、建立者、連結種類）不可被竄改，其他類型的代碼仍完全不可更動。
       allow update: if signedIn()
         && resource.data.type == 'tripInvite'
-        && isOwner(resource.data.tripId)
+        && (isOwner(resource.data.tripId) || isAdminEditor())
         && request.resource.data.type == resource.data.type
         && request.resource.data.tripId == resource.data.tripId
         && request.resource.data.createdAt == resource.data.createdAt
         && request.resource.data.createdBy == resource.data.createdBy
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revoked', 'expiresAt', 'label', 'maxUses', 'updatedAt'])
         && validInvite(request.resource.data, resource.data.tripId);
-      allow delete: if false;
+      // 邀請連結可由該行程統籌人刪除；系統管理員的 canEdit 權限可清理已知的舊版 6 碼邀請／同步代碼。
+      // sync 代碼沒有 tripId，因此管理員只能透過已知代碼 get + delete，不能 list 全部 shortlinks，避免暴露其他使用者的跨裝置同步資料。
+      allow delete: if signedIn()
+        && ((resource.data.type == 'tripInvite' && isOwner(resource.data.tripId))
+          || (isAdminEditor() && resource.data.type in ['tripInvite', 'sync']));
     }
   }
 }
