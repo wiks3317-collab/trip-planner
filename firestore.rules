@@ -44,21 +44,22 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/trips/$(tripId));
     }
 
-    function isLegacyTrip(tripId) {
-      return !('authModelVersion' in tripDoc(tripId).data)
-        || !('ownerUid' in tripDoc(tripId).data)
-        || !('access' in tripDoc(tripId).data);
+    function inviteDoc(code) {
+      return get(/databases/$(database)/documents/shortlinks/$(code));
     }
 
     function isOwner(tripId) {
       return signedIn()
-        && (tripDoc(tripId).data.ownerUid == request.auth.uid
-          || tripDoc(tripId).data.access[request.auth.uid] == 'owner');
+        && (((('ownerUid' in tripDoc(tripId).data) && tripDoc(tripId).data.ownerUid == request.auth.uid))
+          || (('access' in tripDoc(tripId).data) && request.auth.uid in tripDoc(tripId).data.access
+            && tripDoc(tripId).data.access[request.auth.uid] == 'owner'));
     }
 
     function role(tripId) {
       return signedIn()
-        ? tripDoc(tripId).data.access[request.auth.uid]
+        ? (('access' in tripDoc(tripId).data) && request.auth.uid in tripDoc(tripId).data.access
+            ? tripDoc(tripId).data.access[request.auth.uid]
+            : null)
         : null;
     }
 
@@ -83,7 +84,8 @@ service cloud.firestore {
         && data.members.size() <= 100
         && data.access is map
         && data.authModelVersion == 2
-        && data.ownerUid is string;
+        && data.ownerUid is string
+        && data.access[data.ownerUid] == 'owner';
     }
 
     function validInvite(data, tripId) {
@@ -130,19 +132,36 @@ service cloud.firestore {
         && request.resource.data.access == resource.data.access;
     }
 
-    // 行程資料目前採「知道行程 ID／取得分享連結即可讀取」的模式。
-    // 讀取權限與編輯權限分離：未綁定 UID 的訪客只能讀取，不能修改。
-    // 使用者已接受行程內容不必作為私人資料保護；後續仍可再加入邀請碼或更細緻的讀取控管。
+    // 行程主文件包含 members / access / ownerUid 等權限與成員資訊。
+    // v21p3 起不再允許「只要登入就能讀取」；只有已綁定 UID 的成員或系統管理員能讀取。
     function canReadTrip(tripId) {
-      return signedIn();
+      return signedIn()
+        && (isAdmin()
+          || (('access' in tripDoc(tripId).data) && request.auth.uid in tripDoc(tripId).data.access));
+    }
+
+    // 未綁定使用者若要申請加入，必須提交有效的 tripInvite 代碼。
+    // Rules 會直接驗證代碼所屬行程、未撤銷及未過期，避免前端自行偽造 tripId／inviteCode。
+    function canRequestAccess(tripId) {
+      return signedIn()
+        && request.resource.data.inviteCode is string
+        && exists(/databases/$(database)/documents/shortlinks/$(request.resource.data.inviteCode))
+        && inviteDoc(request.resource.data.inviteCode).data.type == 'tripInvite'
+        && inviteDoc(request.resource.data.inviteCode).data.tripId == tripId
+        && inviteDoc(request.resource.data.inviteCode).data.revoked == false
+        && (!('expiresAt' in inviteDoc(request.resource.data.inviteCode).data)
+          || inviteDoc(request.resource.data.inviteCode).data.expiresAt == null
+          || request.time < inviteDoc(request.resource.data.inviteCode).data.expiresAt);
     }
 
     // 行程「內容」（days / spots / wishes / expenses）只有已綁定成員身份的 UID，
-    // 或是系統管理員，才能讀取。行程主文件（名稱、成員名單）仍維持 canReadTrip，
-    // 讓訪客能看到申請畫面並送出加入申請。
+    // 或是系統管理員，才能讀取。未綁定使用者不直接取得任何行程內容。
     function canReadContent(tripId) {
       return signedIn()
-        && (((request.auth.uid in tripDoc(tripId).data.access) && tripNotDeleted(tripId)) || isAdmin());
+        && (isAdmin()
+          || (('access' in tripDoc(tripId).data)
+            && request.auth.uid in tripDoc(tripId).data.access
+            && tripNotDeleted(tripId)));
     }
 
     // 行程是否處於「啟用中」：只有系統管理員能把 disabled 設成 true／false
@@ -167,15 +186,13 @@ service cloud.firestore {
         && validTripBase(request.resource.data)
         && request.resource.data.access[request.auth.uid] == 'owner';
 
-      // 過渡期：舊行程仍可被登入使用者讀取，讓既有資料不會因更新規則而立即失聯。
+      // v21p3：行程主文件包含成員與權限資訊，只允許已綁定成員或系統管理員讀取。
       allow get: if signedIn() && canReadTrip(tripId);
       // 一般使用者仍然不能列出所有行程；只有管理後台（admin.html，Google 登入 + admins/{uid} 存在）
       // 能列出行程主文件（名稱、成員數、建立時間等摘要），不代表能讀寫天數／景點／留言／帳務等子集合，
       // 那些仍然只開放給已綁定該行程 access 的 UID（見下面 canReadContent 與各子集合規則）。
       allow list: if isAdmin();
 
-      // 舊行程只能進行一次性認領：新資料必須把目前登入 UID 設為 owner。
-      // 認領前的舊行程仍存在「任何已登入者都可能先認領」的過渡期風險，完成認領後即改由 UID 控管。
       allow update: if (
           isOwner(tripId)
           && tripActive(tripId)
@@ -193,14 +210,7 @@ service cloud.firestore {
           && request.resource.data.diff(resource.data).affectedKeys()
             .hasOnly(['name', 'currencies', 'fxRates', 'backgroundImageUrl', 'backgroundDim'])
         )
-        || (
-          signedIn()
-          && isLegacyTrip(tripId)
-          && tripActive(tripId)
-          && request.resource.data.ownerUid == request.auth.uid
-          && request.resource.data.access[request.auth.uid] == 'owner'
-          && request.resource.data.authModelVersion == 2
-        )
+
         // 系統管理員專用：只能切換 disabled／disabledAt／disabledBy 這三個欄位（停用／恢復行程），
         // 不能透過這個管道改名稱、成員、權限等其他欄位。故意不要求 tripActive(tripId)，
         // 否則已停用的行程會沒辦法被管理員自己改回啟用。
@@ -337,8 +347,8 @@ service cloud.firestore {
           && request.resource.data.keys().hasOnly(['requestedUid', 'status', 'createdAt', 'inviteCode'])
           && request.resource.data.requestedUid == request.auth.uid
           && request.resource.data.status == 'pending'
-          && (!('inviteCode' in request.resource.data) || request.resource.data.inviteCode == null || request.resource.data.inviteCode is string)
-          && canReadTrip(tripId);
+          && request.resource.data.inviteCode is string
+          && canRequestAccess(tripId);
         allow get: if signedIn()
           && (isOwner(tripId)
             || requestId == request.auth.uid);
@@ -359,7 +369,8 @@ service cloud.firestore {
             && (resource.data.status == 'rejected' || resource.data.status == 'approved')
             && request.resource.data.requestedUid == resource.data.requestedUid
             && request.resource.data.status == 'pending'
-            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'createdAt']));
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'createdAt', 'inviteCode'])
+            && canRequestAccess(tripId));
         allow delete: if false;
       }
     }
