@@ -14,7 +14,7 @@ import {
   onAuthStateChanged,
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
 
-import { firebaseConfig } from "./firebase-options.js"; // 設定值集中在 firebase-options.js
+import { firebaseConfig } from "./firebase-options.js?v=21p3fix2"; // 設定值集中在 firebase-options.js
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);

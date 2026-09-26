@@ -74,24 +74,27 @@
   <!-- Toast 提示 -->
   <div id="toast-container"></div>
 
-  <!-- v21p3 修正版：模組載入失敗時不要讓畫面永久停在「載入中」 -->
-  <script>
-    window.addEventListener("error", function (event) {
-      console.error("[bootstrap] JavaScript 載入／執行錯誤", event.error || event.message);
-      var root = document.getElementById("app-root");
-      if (root && root.querySelector("#loading-screen")) {
-        root.innerHTML = '<div class="card" style="text-align:center;padding:36px 20px;">' +
-          '<h3 style="margin-top:0;">⚠️ 網站程式載入失敗</h3>' +
-          '<p style="color:var(--text-muted);">請重新整理頁面。若持續發生，可能是瀏覽器快取或 Firebase 程式設定造成。</p>' +
-          '<button class="primary-btn" onclick="location.reload()">重新整理</button>' +
-          '</div>';
-      }
-    });
-    window.addEventListener("unhandledrejection", function (event) {
-      console.error("[bootstrap] 未處理的 Promise 錯誤", event.reason);
-    });
+  <!-- v21p3 修正版 2：由單一 bootstrap 入口載入 app.js，避免 Firebase 模組因 query 版本不同而被初始化兩次 -->
+  <script type="module">
+    const showBootstrapError = (err) => {
+      console.error("[bootstrap] 網站程式載入失敗", err);
+      const root = document.getElementById("app-root");
+      if (!root) return;
+      const detail = err?.code ? `（${err.code}）` : "";
+      root.innerHTML = `
+        <div class="card" style="text-align:center;padding:36px 20px;">
+          <h3 style="margin-top:0;">⚠️ 網站程式載入失敗${detail}</h3>
+          <p style="color:var(--text-muted);">程式初始化時發生錯誤。請先重新整理；若仍發生，請將這個畫面截圖給管理者檢查。</p>
+          <button class="primary-btn" id="bootstrap-reload-btn">重新整理</button>
+        </div>`;
+      document.getElementById("bootstrap-reload-btn")?.addEventListener("click", () => location.reload());
+    };
+
+    try {
+      await import("./app.js?v=21p3fix2");
+    } catch (err) {
+      showBootstrapError(err);
+    }
   </script>
-  <script type="module" src="firebase-config.js?v=21p3fix1"></script>
-  <script type="module" src="app.js?v=21p3fix1"></script>
 </body>
 </html>

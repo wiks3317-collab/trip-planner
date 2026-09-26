@@ -3,7 +3,7 @@
 // 純前端 + Firebase Firestore（即時同步資料庫）
 // ============================================================
 
-import { db, auth, authReady } from "./firebase-config.js";
+import { db, auth, authReady } from "./firebase-config.js?v=21p3fix2";
 import {
   collection, doc, getDoc, getDocs, setDoc, addDoc, updateDoc, deleteDoc,
   onSnapshot, query, orderBy, serverTimestamp, writeBatch, runTransaction, Timestamp,
