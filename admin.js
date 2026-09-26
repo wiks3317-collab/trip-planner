@@ -133,6 +133,7 @@ function dashboardShellHtml(user) {
         <button id="admin-signout-btn" class="admin-secondary-btn">登出</button>
       </div>
       <div class="admin-row-actions" style="margin:8px 0;"><button class="admin-secondary-btn" data-act="audit">📜 稽核紀錄</button><button class="admin-secondary-btn" data-act="backup-all" id="admin-backup-btn">💾 匯出全部行程備份</button></div>
+      ${adminCanEdit ? `<div style="border-top:1px dashed var(--border,#DCE3DC);margin:14px 0;padding-top:12px;"><strong>🧹 舊版 6 碼連結清理</strong><p class="admin-muted" style="margin:4px 0 8px;">舊版邀請／跨裝置同步代碼不再使用。由於跨裝置同步代碼沒有隸屬特定行程，系統不會列出全部同步資料；請貼上已知的 6 碼代碼後刪除。舊版邀請連結則會在個別行程內直接顯示。</p><div class="admin-row-actions"><input id="legacy-shortlink-code" maxlength="6" placeholder="輸入舊版 6 碼代碼" style="padding:8px 10px;border:1px solid var(--border,#DCE3DC);border-radius:8px;font:inherit;text-transform:uppercase;letter-spacing:2px;width:190px;"><button class="admin-secondary-btn" data-act="legacy-shortlink-delete">🗑️ 刪除舊版連結</button></div></div>` : ""}
       <p class="admin-muted">
         「檢視內容」會用管理員身份直接顯示天數、景點、許願池留言與記帳明細，不需要先加入該行程。
         「停用」會讓所有成員（含統籌人）都無法再檢視或編輯行程內容，只有管理員能恢復。
@@ -349,6 +350,107 @@ function renderMembersSection(trip) {
 }
 
 // ------------------------------------------------------------
+// 邀請連結管理（管理員後台）
+// ------------------------------------------------------------
+function inviteStatus(link) {
+  if (link.revoked) return "revoked";
+  if (link.expiresAt) {
+    const ms = typeof link.expiresAt.toMillis === "function" ? link.expiresAt.toMillis() : new Date(link.expiresAt).getTime();
+    if (ms <= Date.now()) return "expired";
+  }
+  return "active";
+}
+function inviteStatusLabel(status) {
+  return status === "revoked" ? "已撤銷" : status === "expired" ? "已過期" : "使用中";
+}
+function inviteCodeIsLegacy(code) { return String(code || "").length === 6; }
+function adminInviteUrl(code) { return `${window.location.origin}${window.location.pathname.replace(/admin\.html$/i, "index.html")}#/s/${code}`; }
+function parseAdminDatetimeLocal(value) { if (!value) return null; const d = new Date(value); return isNaN(d.getTime()) ? null : d; }
+function adminDatetimeValue(ts) {
+  if (!ts) return "";
+  const d = typeof ts.toDate === "function" ? ts.toDate() : new Date(ts);
+  const pad = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+async function loadAdminInviteLinks(tripId) {
+  const snap = await getDocs(query(collection(db, "trips", tripId, "inviteLinks"), orderBy("createdAt", "desc")));
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+}
+async function loadAdminInviteRequests(tripId) {
+  try {
+    const snap = await getDocs(collection(db, "trips", tripId, "accessRequests"));
+    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  } catch (e) {
+    console.warn("[admin invite] 無法讀取 accessRequests", e);
+    return [];
+  }
+}
+async function updateAdminInviteLink(tripId, code, patch, action, detail) {
+  if (!adminCanEdit) throw new Error("沒有邀請連結編輯權限");
+  const batch = writeBatch(db);
+  batch.update(doc(db, "shortlinks", code), patch);
+  batch.update(doc(db, "trips", tripId, "inviteLinks", code), patch);
+  batch.set(doc(collection(db, "adminAuditLogs")), {
+    adminUid: currentUser?.uid || null, adminEmail: currentUser?.email || null,
+    tripId, action, detail: { code, ...detail }, createdAt: serverTimestamp()
+  });
+  await batch.commit();
+}
+async function deleteAdminInviteLink(tripId, code) {
+  if (!adminCanEdit) throw new Error("沒有邀請連結刪除權限");
+  const batch = writeBatch(db);
+  batch.delete(doc(db, "shortlinks", code));
+  batch.delete(doc(db, "trips", tripId, "inviteLinks", code));
+  batch.set(doc(collection(db, "adminAuditLogs")), {
+    adminUid: currentUser?.uid || null, adminEmail: currentUser?.email || null,
+    tripId, action: "invite-delete", detail: { code, legacy: inviteCodeIsLegacy(code) }, createdAt: serverTimestamp()
+  });
+  await batch.commit();
+}
+async function deleteKnownShortlink(code) {
+  if (!adminCanEdit) throw new Error("沒有舊版連結刪除權限");
+  const normalized = String(code || "").trim().toUpperCase();
+  if (!/^[A-Z0-9]{6}$/.test(normalized)) throw new Error("舊版連結代碼必須是 6 碼英數字");
+  const ref = doc(db, "shortlinks", normalized);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) throw new Error("找不到這組 6 碼連結，可能已刪除或從未存在");
+  const data = snap.data() || {};
+  if (!["tripInvite", "sync"].includes(data.type)) throw new Error("這組代碼不是可清理的邀請／同步連結");
+  const batch = writeBatch(db);
+  batch.delete(ref);
+  if (data.type === "tripInvite" && data.tripId) batch.delete(doc(db, "trips", data.tripId, "inviteLinks", normalized));
+  if (data.type === "sync") {
+    batch.set(doc(collection(db, "adminAuditLogs")), { adminUid: currentUser?.uid || null, adminEmail: currentUser?.email || null, tripId: "(shortlinks)", action: "legacy-sync-delete", detail: { code: normalized }, createdAt: serverTimestamp() });
+  } else {
+    batch.set(doc(collection(db, "adminAuditLogs")), { adminUid: currentUser?.uid || null, adminEmail: currentUser?.email || null, tripId: data.tripId || "", action: "legacy-invite-delete", detail: { code: normalized }, createdAt: serverTimestamp() });
+  }
+  await batch.commit();
+}
+
+function renderAdminInviteLinksSection(trip, links, requests) {
+  const counts = {};
+  requests.filter(r => r.status === "approved" && r.inviteCode).forEach(r => { counts[r.inviteCode] = (counts[r.inviteCode] || 0) + 1; });
+  if (!links.length) return `<h2 class="admin-section-title">🔗 邀請連結</h2><p class="admin-muted">目前沒有邀請連結。</p>`;
+  return `<h2 class="admin-section-title">🔗 邀請連結</h2>
+    <p class="admin-muted">管理員可檢視此行程所有邀請連結；具編輯權限者可調整到期時間、次數上限，或將連結撤銷並永久刪除。6 碼連結會標示為舊版，建議逐一清除。</p>
+    <div class="admin-table-scroll"><table class="admin-table">
+      <thead><tr><th>連結用途</th><th>版本／狀態</th><th>到期時間</th><th>使用次數</th><th>建立時間</th><th>連結</th><th>操作</th></tr></thead><tbody>
+      ${links.map(l => {
+        const status=inviteStatus(l), used=counts[l.id] || 0, remain=l.maxUses ? Math.max(0, l.maxUses-used) : null;
+        const legacy=inviteCodeIsLegacy(l.id);
+        return `<tr>
+          <td data-label="連結用途">${escapeHtml(l.label || "（未命名）")}<div class="admin-muted" style="font-size:11px;"><code>${escapeHtml(l.id)}</code></div></td>
+          <td data-label="版本／狀態">${legacy ? '<span class="admin-badge admin-badge-disabled">舊版 6 碼</span> ' : '<span class="admin-badge admin-badge-active">新版 12 碼</span> '}<span class="admin-badge ${status === "active" ? "admin-badge-active" : "admin-badge-disabled"}">${inviteStatusLabel(status)}</span></td>
+          <td data-label="到期時間">${l.expiresAt ? fmtDate(l.expiresAt) : "永久"}</td>
+          <td data-label="使用次數">${used}${l.maxUses ? ` / ${l.maxUses}（剩 ${remain}）` : "（無限制）"}</td>
+          <td data-label="建立時間">${fmtDate(l.createdAt)}</td>
+          <td data-label="連結"><input readonly value="${escapeHtml(adminInviteUrl(l.id))}" onclick="this.select()" style="width:240px;max-width:100%;padding:6px;border:1px solid var(--border);border-radius:6px;font-size:11px;"></td>
+          <td data-label="操作" class="admin-row-actions">${adminCanEdit ? btn("invite-edit", "編輯", { code:l.id }) : ""}${adminCanEdit ? btn("invite-delete", legacy ? "刪除舊版" : "撤銷並刪除", { code:l.id }, true) : ""}</td>
+        </tr>`;
+      }).join("")}</tbody></table></div>`;
+}
+
+// ------------------------------------------------------------
 // 行程內容載入（許願池留言預設不載入，點開才讀，匯出時才全部讀）
 // ------------------------------------------------------------
 async function loadWishes(tripId, dayId, spotId) {
@@ -398,7 +500,9 @@ async function showTripDetail(tripId) {
 
   try {
     const tree = await loadTripTree(tripId, false);
-    detailCtx = { tripId, trip, tree };
+    const inviteLinks = await loadAdminInviteLinks(tripId);
+    const inviteRequests = await loadAdminInviteRequests(tripId);
+    detailCtx = { tripId, trip, tree, inviteLinks, inviteRequests };
     const memberNameById = {};
     (trip.members || []).forEach((m) => { memberNameById[m.id] = m.name; });
     const disabled = trip.disabled === true;
@@ -422,6 +526,7 @@ async function showTripDetail(tripId) {
         <p class="admin-muted">${adminCanEdit ? "你的帳號具有編輯權限，所有修改都會寫入稽核紀錄。" : "目前是唯讀檢視（此帳號的 admins 文件尚未設定 canEdit: true）。"}</p>
 
         ${renderMembersSection(trip)}
+        ${renderAdminInviteLinksSection(trip, detailCtx.inviteLinks || [], detailCtx.inviteRequests || [])}
 
         <h2 class="admin-section-title">📅 天數與景點</h2>
         ${tree.days.length === 0 ? `<p class="admin-muted">目前沒有任何天數。</p>` : tree.days.map((day) => `
@@ -604,11 +709,46 @@ async function onRootClick(e) {
   try {
     if (d.act === "audit") return await showAuditLog();
     if (d.act === "backup-all") return await exportAllTrips();
+    if (d.act === "legacy-shortlink-delete") {
+      if (!adminCanEdit) return;
+      const input = document.getElementById("legacy-shortlink-code");
+      const code = (input?.value || "").trim().toUpperCase();
+      if (!/^[A-Z0-9]{6}$/.test(code)) return window.alert("請輸入 6 碼舊版代碼");
+      if (!window.confirm(`確定要永久刪除舊版代碼「${code}」嗎？此動作無法復原。`)) return;
+      await deleteKnownShortlink(code);
+      input.value = "";
+      return window.alert("已刪除舊版連結；若原本是邀請連結，其行程內鏡像也已一併刪除。");
+    }
     if (d.act.startsWith("mem-")) return await onMemberAction(d);
     if (!detailCtx) return;
     const { tripId, trip, tree } = detailCtx;
     if (d.act === "export") return await exportTrip();
     if (d.act === "import") return await importTripAsNew();
+    if (d.act === "invite-delete" || d.act === "invite-edit") {
+      if (!adminCanEdit) return;
+      const link = (detailCtx.inviteLinks || []).find(x => x.id === d.code);
+      if (!link) return window.alert("找不到這組邀請連結，請重新整理。");
+      if (d.act === "invite-delete") {
+        const legacy = inviteCodeIsLegacy(d.code);
+        const msg = legacy ? `確定永久刪除舊版 6 碼邀請連結「${d.code}」嗎？` : `確定要撤銷並永久刪除邀請連結「${d.code}」嗎？`;
+        if (!window.confirm(msg + "\n刪除後網址立即失效，且無法恢復。")) return;
+        await deleteAdminInviteLink(tripId, d.code);
+      } else {
+        const expiry = window.prompt("到期時間（YYYY-MM-DDTHH:mm，留空=永久）", adminDatetimeValue(link.expiresAt));
+        if (expiry === null) return;
+        const date = parseAdminDatetimeLocal(expiry.trim());
+        if (expiry.trim() && !date) return window.alert("到期時間格式不正確");
+        const maxRaw = window.prompt("次數上限（留空=無限制）", link.maxUses ? String(link.maxUses) : "");
+        if (maxRaw === null) return;
+        const maxUses = maxRaw.trim() ? Math.max(1, Math.min(10000, parseInt(maxRaw, 10) || 0)) : null;
+        if (maxRaw.trim() && !maxUses) return window.alert("次數上限請輸入正整數");
+        const label = window.prompt("連結用途／標籤（可留空）", link.label || "");
+        if (label === null) return;
+        await updateAdminInviteLink(tripId, d.code, { expiresAt: date, maxUses, label: label.trim().slice(0, 200), updatedAt: serverTimestamp() }, "invite-update", { expiresAt: date ? date.toISOString() : null, maxUses, label: label.trim().slice(0, 200) });
+      }
+      await showTripDetail(tripId);
+      return;
+    }
     if (d.act === "wishes") {
       el.disabled = true;
       el.textContent = "載入中...";
