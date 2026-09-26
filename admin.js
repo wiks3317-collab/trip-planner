@@ -427,14 +427,58 @@ async function deleteKnownShortlink(code) {
   await batch.commit();
 }
 
+async function createAdminInviteLink(tripId, { label, expiresAt, maxUses } = {}) {
+  if (!adminCanEdit) throw new Error("沒有邀請連結建立權限");
+  if (!(await ensureRecentLogin("建立邀請連結"))) throw new Error("CANCELLED");
+  const cleanLabel = String(label || "").trim().slice(0, 200);
+  const value = expiresAt ? Timestamp.fromDate(expiresAt) : null;
+  for (let i = 0; i < 6; i++) {
+    const code = genAdminShortCode(12);
+    const payload = {
+      type: "tripInvite", tripId, createdBy: currentUser?.uid || "", createdAt: serverTimestamp(),
+      label: cleanLabel, expiresAt: value, revoked: false, maxUses: maxUses || null, usedCount: 0
+    };
+    const batch = writeBatch(db);
+    batch.set(doc(db, "shortlinks", code), payload);
+    batch.set(doc(db, "trips", tripId, "inviteLinks", code), payload);
+    batch.set(doc(collection(db, "adminAuditLogs")), {
+      adminUid: currentUser?.uid || null, adminEmail: currentUser?.email || null, tripId,
+      action: "invite-create", detail: { code, label: cleanLabel, expiresAt: expiresAt ? expiresAt.toISOString() : null, maxUses: maxUses || null },
+      createdAt: serverTimestamp()
+    });
+    try { await batch.commit(); return code; }
+    catch (err) { if (err?.code === "permission-denied") throw err; }
+  }
+  throw new Error("無法產生唯一的 12 碼邀請代碼");
+}
+
+function genAdminShortCode(len = 12) {
+  const chars = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+  const values = new Uint32Array(len); crypto.getRandomValues(values);
+  return Array.from(values, (v) => chars[v % chars.length]).join("");
+}
+
 function renderAdminInviteLinksSection(trip, links, requests) {
   const counts = {};
   requests.filter(r => r.status === "approved" && r.inviteCode).forEach(r => { counts[r.inviteCode] = (counts[r.inviteCode] || 0) + 1; });
-  if (!links.length) return `<h2 class="admin-section-title">🔗 邀請連結</h2><p class="admin-muted">目前沒有邀請連結。</p>`;
+  if (!links.length) return `<h2 class="admin-section-title">🔗 邀請連結</h2>
+    ${adminCanEdit ? `<div class="admin-row-actions" style="margin:8px 0 12px;">
+      <input id="admin-new-invite-label" placeholder="連結用途（選填）" style="flex:1;min-width:150px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font:inherit;">
+      <input id="admin-new-invite-expiry" type="datetime-local" style="padding:8px;border:1px solid var(--border);border-radius:8px;">
+      <input id="admin-new-invite-maxuses" type="number" min="1" max="10000" placeholder="次數上限（留空=無限）" style="width:170px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;">
+      <button class="admin-primary-btn" data-act="invite-create">＋ 建立邀請連結</button>
+    </div>` : ""}
+    <p class="admin-muted">目前沒有邀請連結。</p>`;
   return `<h2 class="admin-section-title">🔗 邀請連結</h2>
-    <p class="admin-muted">管理員可檢視此行程所有邀請連結；具編輯權限者可調整到期時間、次數上限，或將連結撤銷並永久刪除。6 碼連結會標示為舊版，建議逐一清除。</p>
+    <p class="admin-muted">邀請代碼一律由系統隨機產生 12 碼，介面不提供手動編輯代碼。具編輯權限者可建立、調整到期時間／次數上限或永久刪除；所有建立與修改操作均寫入稽核紀錄。6 碼連結會標示為舊版，建議逐一清除。</p>
+    ${adminCanEdit ? `<div class="admin-row-actions" style="margin:8px 0 12px;">
+      <input id="admin-new-invite-label" placeholder="連結用途（選填）" style="flex:1;min-width:150px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font:inherit;">
+      <input id="admin-new-invite-expiry" type="datetime-local" style="padding:8px;border:1px solid var(--border);border-radius:8px;">
+      <input id="admin-new-invite-maxuses" type="number" min="1" max="10000" placeholder="次數上限（留空=無限）" style="width:170px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;">
+      <button class="admin-primary-btn" data-act="invite-create">＋ 建立邀請連結</button>
+    </div>` : ""}
     <div class="admin-table-scroll"><table class="admin-table">
-      <thead><tr><th>連結用途</th><th>版本／狀態</th><th>到期時間</th><th>使用次數</th><th>建立時間</th><th>連結</th><th>操作</th></tr></thead><tbody>
+      <thead><tr><th>連結用途</th><th>版本／狀態</th><th>到期時間</th><th>使用次數</th><th>建立時間</th><th>12 碼代碼／連結</th><th>操作</th></tr></thead><tbody>
       ${links.map(l => {
         const status=inviteStatus(l), used=counts[l.id] || 0, remain=l.maxUses ? Math.max(0, l.maxUses-used) : null;
         const legacy=inviteCodeIsLegacy(l.id);
@@ -444,7 +488,7 @@ function renderAdminInviteLinksSection(trip, links, requests) {
           <td data-label="到期時間">${l.expiresAt ? fmtDate(l.expiresAt) : "永久"}</td>
           <td data-label="使用次數">${used}${l.maxUses ? ` / ${l.maxUses}（剩 ${remain}）` : "（無限制）"}</td>
           <td data-label="建立時間">${fmtDate(l.createdAt)}</td>
-          <td data-label="連結"><input readonly value="${escapeHtml(adminInviteUrl(l.id))}" onclick="this.select()" style="width:240px;max-width:100%;padding:6px;border:1px solid var(--border);border-radius:6px;font-size:11px;"></td>
+          <td data-label="12 碼代碼"><code style="font-size:13px;letter-spacing:1.5px;">${escapeHtml(l.id)}</code><div class="admin-muted" style="font-size:11px;word-break:break-all;margin-top:4px;">${escapeHtml(adminInviteUrl(l.id))}</div></td>
           <td data-label="操作" class="admin-row-actions">${adminCanEdit ? btn("invite-edit", "編輯", { code:l.id }) : ""}${adminCanEdit ? btn("invite-delete", legacy ? "刪除舊版" : "撤銷並刪除", { code:l.id }, true) : ""}</td>
         </tr>`;
       }).join("")}</tbody></table></div>`;
@@ -720,6 +764,25 @@ async function onRootClick(e) {
       return window.alert("已刪除舊版連結；若原本是邀請連結，其行程內鏡像也已一併刪除。");
     }
     if (d.act.startsWith("mem-")) return await onMemberAction(d);
+    if (d.act === "invite-create") {
+      if (!adminCanEdit || !detailCtx) return;
+      const label = document.getElementById("admin-new-invite-label")?.value || "";
+      const expiryRaw = document.getElementById("admin-new-invite-expiry")?.value || "";
+      const expiry = expiryRaw ? parseAdminDatetimeLocal(expiryRaw) : null;
+      if (expiryRaw && !expiry) return window.alert("到期時間格式不正確");
+      const maxRaw = (document.getElementById("admin-new-invite-maxuses")?.value || "").trim();
+      const maxUses = maxRaw ? Math.max(1, Math.min(10000, parseInt(maxRaw, 10) || 0)) : null;
+      if (maxRaw && !maxUses) return window.alert("次數上限請輸入正整數");
+      el.disabled = true;
+      try {
+        await createAdminInviteLink(detailCtx.tripId, { label, expiresAt: expiry, maxUses });
+        await showTripDetail(detailCtx.tripId);
+      } catch (err) {
+        if (err?.message !== "CANCELLED") window.alert("建立邀請連結失敗：" + (err?.message || String(err)));
+        el.disabled = false;
+      }
+      return;
+    }
     if (!detailCtx) return;
     const { tripId, trip, tree } = detailCtx;
     if (d.act === "export") return await exportTrip();
@@ -897,7 +960,10 @@ function renderMemberEditor() {
       <p class="admin-muted">行程：${escapeHtml(trip.name || "")}。行程必須恰有一位統籌人，且統籌人至少綁定一個 UID；同一個 UID 只能屬於一位成員。選擇「統籌人」會自動把原統籌人降為可編輯。所有變更都會寫入稽核紀錄。</p>
       ${members.map((m, i) => `
         <div class="admin-day-block">
-          <h3>${escapeHtml(m.name || "（未命名）")}</h3>
+          <div class="admin-row-actions" style="align-items:center;margin-bottom:8px;">
+            <input data-act="mem-name" data-idx="${i}" value="${escapeHtml(m.name || "")}" placeholder="成員姓名／暱稱" style="flex:1;min-width:180px;padding:8px 10px;border:1px solid var(--border,#DCE3DC);border-radius:8px;font:inherit;">
+            ${members.length > 1 ? btn("mem-del", "移除成員", { idx: i }, true) : ""}
+          </div>
           <label class="admin-muted">權限
             <select data-act="mem-perm" data-idx="${i}" style="padding:6px;border-radius:8px;border:1px solid var(--border,#DCE3DC);font:inherit;">
               ${["owner", "editor", "viewer"].map((p) => `<option value="${p}" ${m.permission === p ? "selected" : ""}>${permissionLabel(p)}</option>`).join("")}
@@ -910,9 +976,16 @@ function renderMemberEditor() {
           </div>
         </div>
       `).join("")}
+      <button class="admin-secondary-btn" data-act="mem-add">＋ 新增成員</button>
       <button class="admin-primary-btn" data-act="mem-save">儲存變更</button>
     </div>
   `);
+  document.querySelectorAll('[data-act="mem-name"]').forEach((el) => {
+    el.addEventListener("input", () => {
+      const m = members[Number(el.dataset.idx)];
+      if (m) m.name = el.value;
+    });
+  });
 }
 
 async function onMemberAction(d) {
@@ -921,6 +994,18 @@ async function onMemberAction(d) {
   if (!memberDraft) return;
   const { tripId, trip, members } = memberDraft;
   if (d.act === "mem-cancel") { memberDraft = null; return await showTripDetail(tripId); }
+  if (d.act === "mem-add") {
+    if (members.length >= 100) return window.alert("單一行程最多 100 位成員");
+    members.push({ id: newLocalId(), name: "", permission: "viewer", uids: [] });
+    return renderMemberEditor();
+  }
+  if (d.act === "mem-del") {
+    const idx = Number(d.idx);
+    if (members.length <= 1) return window.alert("至少要保留一位成員");
+    if (members[idx]?.permission === "owner") return window.alert("請先將統籌人改為其他成員後，再移除這位成員");
+    members.splice(idx, 1);
+    return renderMemberEditor();
+  }
   if (d.act === "mem-uid-del") {
     members[Number(d.idx)].uids.splice(Number(d.pos), 1);
     return renderMemberEditor();
@@ -935,6 +1020,10 @@ async function onMemberAction(d) {
   }
   if (d.act === "mem-save") {
     if (!(await ensureRecentLogin("更新成員權限與 UID"))) return;
+    const blankName = members.find((m) => !String(m.name || "").trim());
+    if (blankName) return window.alert("每位成員都需要填寫名稱");
+    const duplicateIds = new Set();
+    for (const m of members) { if (duplicateIds.has(m.id)) return window.alert("成員 ID 發生重複，請取消後重新開啟編輯頁面"); duplicateIds.add(m.id); }
     const owners = members.filter((m) => m.permission === "owner");
     if (owners.length !== 1) return window.alert("行程必須恰有一位統籌人");
     if (!owners[0].uids.length) return window.alert("統籌人至少要綁定一個 UID");
@@ -946,7 +1035,7 @@ async function onMemberAction(d) {
     const changes = members.map((m) => {
       const o = orig.find((x) => x.id === m.id) || {};
       const ou = memberUidList(o);
-      return { name: m.name || "", from: o.permission || null, to: m.permission, added: m.uids.filter((u) => !ou.includes(u)), removed: ou.filter((u) => !m.uids.includes(u)) };
+      return { name: m.name || "", memberId: m.id, from: o.permission || null, to: m.permission, added: m.uids.filter((u) => !ou.includes(u)), removed: ou.filter((u) => !m.uids.includes(u)) };
     }).filter((c) => c.from !== c.to || c.added.length || c.removed.length);
     if (!changes.length) return window.alert("沒有任何變更");
 
