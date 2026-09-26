@@ -95,6 +95,14 @@ service cloud.firestore {
         && (!('usedCount' in data) || (data.usedCount is int && data.usedCount >= 0));
     }
 
+    function validSyncShortlink(data) {
+      return data.type == 'sync'
+        && data.createdBy == request.auth.uid
+        && data.list is list
+        && data.list.size() <= 30
+        && data.keys().hasOnly(['type', 'list', 'createdBy', 'createdAt']);
+    }
+
     function validExpense(data) {
       return data.title is string
         && data.title.size() > 0
@@ -325,8 +333,10 @@ service cloud.firestore {
       match /accessRequests/{requestId} {
         allow create: if signedIn()
           && requestId == request.auth.uid
+          && request.resource.data.keys().hasOnly(['requestedUid', 'status', 'createdAt', 'inviteCode'])
           && request.resource.data.requestedUid == request.auth.uid
           && request.resource.data.status == 'pending'
+          && (!('inviteCode' in request.resource.data) || request.resource.data.inviteCode == null || request.resource.data.inviteCode is string)
           && canReadTrip(tripId);
         allow get: if signedIn()
           && (isOwner(tripId)
@@ -335,6 +345,7 @@ service cloud.firestore {
         allow update: if (
             isOwner(tripId)
             && request.resource.data.requestedUid == resource.data.requestedUid
+            && request.resource.data.status in ['pending', 'approved', 'rejected']
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
               'status', 'approvedMemberId', 'approvedAt', 'rejectedAt', 'updatedAt'
             ])
@@ -382,7 +393,7 @@ service cloud.firestore {
             && request.resource.data.tripId is string
             && isOwner(request.resource.data.tripId)
             && validInvite(request.resource.data, request.resource.data.tripId))
-          || request.resource.data.type == 'sync'
+          || validSyncShortlink(request.resource.data)
         );
       // 邀請連結（tripInvite）可由該行程統籌人調整到期時間／撤銷或恢復啟用；
       // 其餘欄位（所屬行程、建立時間、建立者、連結種類）不可被竄改，其他類型的代碼仍完全不可更動。
