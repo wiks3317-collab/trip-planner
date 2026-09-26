@@ -7,7 +7,7 @@
 
 import { db, auth, adminSignIn, adminSignOut, onAuthStateChanged } from "./admin-firebase-config.js";
 import {
-  collection, doc, getDoc, getDocs, updateDoc, query, orderBy, serverTimestamp, writeBatch, limit,
+  collection, doc, getDoc, getDocs, updateDoc, query, orderBy, serverTimestamp, writeBatch, runTransaction, limit,
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 
 const root = document.getElementById("admin-root");
@@ -310,6 +310,22 @@ async function commitWithAudit(tripId, action, detail, build) {
   });
   await batch.commit();
 }
+
+function canonicalMemberSnapshot(members) {
+  return (Array.isArray(members) ? members : []).map((m) => {
+    const uids = memberUidList(m);
+    return {
+      ...m,
+      uids,
+      uid: uids[0] || null,
+    };
+  }).sort((a, b) => String(a.id || "").localeCompare(String(b.id || "")));
+}
+
+function sameMemberSnapshot(a, b) {
+  return JSON.stringify(canonicalMemberSnapshot(a)) === JSON.stringify(canonicalMemberSnapshot(b));
+}
+
 
 const btn = (act, label, data = {}, danger = false) =>
   `<button class="admin-link-btn${danger ? " admin-danger" : ""}" data-act="${act}" ${Object.entries(data).map(([k, v]) => `data-${k}="${escapeHtml(v)}"`).join(" ")}>${label}</button>`;
@@ -792,15 +808,39 @@ async function onMemberAction(d) {
     }).filter((c) => c.from !== c.to || c.added.length || c.removed.length);
     if (!changes.length) return window.alert("沒有任何變更");
 
-    const fresh = await getDoc(doc(db, "trips", tripId));
-    if (JSON.stringify(fresh.data()?.members || []) !== memberDraft.origJson) {
-      return window.alert("這個行程的成員資料剛剛被別人修改過，請取消後重新開啟編輯畫面再操作。");
-    }
     const ownerChanged = ownerUid !== trip.ownerUid;
     if (!window.confirm(`即將套用 ${changes.length} 位成員的變更${ownerChanged ? "，並且更換統籌人" : ""}。確定嗎？`)) return;
 
-    const newMembers = members.map((m) => ({ ...m, uids: m.uids, uid: m.uids[0] || null }));
-    await commitWithAudit(tripId, "members-update", { changes, ownerChanged }, (b) => b.update(doc(db, "trips", tripId), { members: newMembers, access, ownerUid }));
+    const newMembers = members.map((m) => ({ ...m, uids: [...m.uids], uid: m.uids[0] || null }));
+    const tripRef = doc(db, "trips", tripId);
+    const auditRef = doc(collection(db, "adminAuditLogs"));
+    try {
+      await runTransaction(db, async (tx) => {
+        const fresh = await tx.get(tripRef);
+        if (!fresh.exists()) throw new Error("行程不存在，請重新整理後再操作");
+        const latest = fresh.data() || {};
+        if (!sameMemberSnapshot(latest.members || [], JSON.parse(memberDraft.origJson))) {
+          throw new Error("MEMBERS_CONFLICT");
+        }
+        const latestOwners = (latest.members || []).filter((m) => m.permission === "owner");
+        if (latestOwners.length !== 1) throw new Error("目前行程的統籌人資料已異常，請先檢查行程資料");
+        tx.update(tripRef, { members: newMembers, access, ownerUid });
+        tx.set(auditRef, {
+          adminUid: currentUser?.uid || null,
+          adminEmail: currentUser?.email || null,
+          tripId,
+          action: "members-update",
+          detail: { changes, ownerChanged },
+          createdAt: serverTimestamp(),
+        });
+      });
+    } catch (err) {
+      console.error("members-update transaction failed", err);
+      if (err?.message === "MEMBERS_CONFLICT") {
+        return window.alert("這個行程的成員資料剛剛被別人修改過，請取消後重新開啟編輯畫面再操作。");
+      }
+      return window.alert("儲存成員權限／UID 失敗：" + (err?.message || String(err)));
+    }
     Object.assign(trip, { members: newMembers, access, ownerUid });
     memberDraft = null;
     await showTripDetail(tripId);
