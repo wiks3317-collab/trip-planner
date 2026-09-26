@@ -7,7 +7,7 @@
 
 import { db, auth, adminSignIn, adminSignOut, onAuthStateChanged } from "./admin-firebase-config.js";
 import {
-  collection, doc, getDoc, getDocs, updateDoc, query, orderBy, serverTimestamp, writeBatch, runTransaction, limit,
+  collection, doc, getDoc, getDocs, updateDoc, query, orderBy, serverTimestamp, writeBatch, runTransaction, limit, Timestamp,
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 
 const root = document.getElementById("admin-root");
@@ -1096,6 +1096,17 @@ async function isAdminUser(uid) {
   const snap = await getDoc(doc(db, "admins", uid));
   return snap.exists() ? (snap.data() || {}) : null;
 }
+
+window.addEventListener("error", (event) => {
+  console.error("[admin] unhandled error", event.error || event.message);
+  const msg = event.error?.message || event.message || "未知錯誤";
+  if (root) root.innerHTML = `<div class="admin-card"><h1>管理後台載入失敗</h1><p class="admin-muted">${escapeHtml(msg)}</p><p class="admin-muted">請重新整理頁面；若仍發生，請開啟瀏覽器主控台查看錯誤。</p></div>`;
+});
+window.addEventListener("unhandledrejection", (event) => {
+  console.error("[admin] unhandled rejection", event.reason);
+  const msg = event.reason?.message || String(event.reason || "未知錯誤");
+  if (root) root.innerHTML = `<div class="admin-card"><h1>管理後台載入失敗</h1><p class="admin-muted">${escapeHtml(msg)}</p><p class="admin-muted">請重新整理頁面；若仍發生，請開啟瀏覽器主控台查看錯誤。</p></div>`;
+});
 
 render(`<div class="admin-card"><p class="admin-muted">載入中...</p></div>`);
 
