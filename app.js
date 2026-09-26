@@ -1374,7 +1374,7 @@ document.getElementById("join-trip-btn").addEventListener("click", () => {
   openModal("用邀請連結加入行程", `
     <div class="form-row">
       <label>貼上統籌人傳給你的邀請連結</label>
-      <input type="text" id="join-input" placeholder="https://.../#/s/K7XPQ2 或 K7XPQ2">
+      <input type="text" id="join-input" placeholder="https://.../#/s/ABCDEF234567 或 ABCDEF234567">
     </div>
     <div class="form-actions">
       <button class="secondary-btn" id="join-cancel">取消</button>
@@ -1397,12 +1397,20 @@ async function handleJoinInput(raw) {
     navigate(`#/trip/${m[1]}`);
     return;
   }
-  // 短連結格式：.../#/s/CODE，或直接貼代碼本身
-  m = raw.match(/\/s\/([a-zA-Z0-9]+)/);
-  const code = (m ? m[1] : raw).toUpperCase();
-  if (code.length <= 8) {
-    // 交給 resolveTripShortCode 處理：邀請連結（含到期／撤銷檢查）與舊版行程代碼都能解析
+  // 新版短連結格式：.../#/s/CODE，或直接貼 12 碼代碼。
+  // 6 碼舊版代碼不再視為可加入行程的有效輸入；舊資料請由管理者清理。
+  const shortPath = raw.match(/\/s\/([a-zA-Z0-9]+)/);
+  const code = (shortPath ? shortPath[1] : raw).toUpperCase();
+  if (shortPath && code.length === 6) {
+    toast("6 碼舊版代碼已停止使用，請索取新的 12 碼邀請連結");
+    return;
+  }
+  if (/^[A-Z0-9]{12}$/.test(code)) {
     navigate(`#/s/${code}`);
+    return;
+  }
+  if (/^[A-Z0-9]{6}$/.test(raw)) {
+    toast("6 碼舊版代碼已停止使用，請索取新的 12 碼邀請代碼");
     return;
   }
   // 長度看起來不像短代碼，當作行程 ID 直接嘗試
@@ -1411,7 +1419,7 @@ async function handleJoinInput(raw) {
 
 // ------------------------------------------------------------
 // 短代碼／短連結（shortlinks 集合）
-// 用一組 6 碼英數字代碼取代原本又長又難輸入的行程 ID／同步資料，
+// 用一組 12 碼英數字代碼取代原本又長又難輸入的行程 ID／同步資料，
 // 存一份對照資料在 Firestore 的 shortlinks/{code}，任何人都能用代碼查（get），
 // 但無法列出所有代碼、也無法竄改或刪除已存在的代碼（見 README 的安全規則）。
 // ------------------------------------------------------------
@@ -3157,7 +3165,11 @@ function renderManageMembersModal() {
             <span class="status-tag status-${status}">${inviteLinkStatusLabel(status)}</span>
           </div>
           <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${escapeHtml(usageText)}</div>
-          <input type="text" readonly value="${escapeHtml(inviteUrl)}" onclick="this.select()" style="width:100%;margin-top:6px;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+          <div style="margin-top:7px;padding:7px 9px;background:var(--surface-muted,#F6F8F6);border-radius:6px;">
+            <div style="font-size:10px;color:var(--text-muted);">12 碼代碼</div>
+            <code style="font-size:16px;letter-spacing:2px;font-weight:700;word-break:break-all;">${escapeHtml(link.id)}</code>
+          </div>
+          <div style="margin-top:6px;font-size:11px;word-break:break-all;color:var(--text-muted);">${escapeHtml(inviteUrl)}</div>
           <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px;">
             <button class="secondary-btn small-btn copy-invite-btn" data-url="${escapeHtml(inviteUrl)}">📋 複製</button>
             <input type="datetime-local" class="invite-expiry-input" data-code="${link.id}" value="${toDatetimeLocalValue(link.expiresAt)}" style="padding:6px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;" ${status === "revoked" ? "disabled" : ""}>
