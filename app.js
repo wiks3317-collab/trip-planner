@@ -417,6 +417,11 @@ async function route() {
   }
 
   if (state.tripId !== r.tripId) {
+    // 直接輸入／切換到 tripId 時，不沿用上一個邀請連結的狀態。
+    if (!r.shortCode) {
+      state.openedViaInvite = false;
+      state.inviteCode = null;
+    }
     await loadTrip(r.tripId);
   }
 
@@ -521,7 +526,21 @@ async function loadTrip(tripId) {
   renderLoading();
 
   const tripRef = doc(db, "trips", tripId);
-  const snap = await getDoc(tripRef);
+  let snap;
+  try {
+    snap = await getDoc(tripRef);
+  } catch (err) {
+    if (err?.code === "permission-denied" && state.openedViaInvite && state.inviteCode) {
+      stopContentSubscriptions();
+      hideSpotPanel();
+      renderAccessGate();
+      return;
+    }
+    console.error("[trip] 載入行程失敗", err);
+    toast(err?.code === "permission-denied" ? "此行程需要有效的成員身份或邀請連結才能進入" : "行程載入失敗，請稍後再試");
+    navigate("");
+    return;
+  }
   if (!snap.exists()) {
     toast("找不到這個行程，連結可能有誤");
     navigate("");
@@ -610,10 +629,14 @@ async function createEditAccessRequest() {
 
   if (existing.exists()) {
     // 既有申請只更新必要欄位，避免 setDoc 覆寫並刪除歷史審核欄位；
-    // 原本記錄的 inviteCode 保留不動（Rules 也只允許改 status/createdAt）。
+    // 重新申請時必須使用目前有效的邀請連結，Rules 會同步驗證 inviteCode 與行程的對應關係。
+    if (!state.openedViaInvite || !state.inviteCode) {
+      throw new Error("需要有效的邀請連結才能重新申請");
+    }
     await updateDoc(requestRef, {
       status: "pending",
       createdAt: serverTimestamp(),
+      inviteCode: state.inviteCode,
     });
   } else {
     await setDoc(requestRef, {
@@ -664,37 +687,6 @@ async function rejectAccessRequest(requestId) {
     status: "rejected",
     rejectedAt: serverTimestamp(),
   });
-}
-
-function isLegacyTrip() {
-  return !state.trip?.authModelVersion || !state.trip?.ownerUid || !state.trip?.access;
-}
-
-async function claimLegacyTrip() {
-  const uid = currentUid();
-  if (!uid || !state.trip || !isLegacyTrip()) return;
-  const ownerIndex = (state.trip.members || []).findIndex((m) => m.permission === "owner");
-  if (ownerIndex < 0) {
-    toast("這個舊行程沒有找到統籌人資料，請先在 Firebase Console 確認 members");
-    return;
-  }
-  const members = (state.trip.members || []).map((m, i) => ({
-    ...m,
-    uid: i === ownerIndex ? uid : (m.uid || null),
-  }));
-  const normalizedMembers = members.map((m) => ({ ...m, uids: memberUids(m) }));
-  const access = {};
-  normalizedMembers.forEach((m) => {
-    memberUids(m).forEach((mUid) => { if (mUid) access[mUid] = m.permission; });
-  });
-  await updateDoc(doc(db, "trips", state.tripId), {
-    members: normalizedMembers,
-    ownerUid: uid,
-    access,
-    authModelVersion: 2,
-    migratedAt: serverTimestamp(),
-  });
-  toast("已將此舊行程綁定到目前裝置的匿名身份");
 }
 
 async function updateTripCurrencies(currencies) {
@@ -1698,23 +1690,6 @@ function permLabel(p) {
 }
 
 
-// 「我是原統籌人，進行資料銜接」按鈕的行為
-function attachClaimLegacyHandler(btn) {
-  if (!btn) return;
-  btn.onclick = async () => {
-    if (!confirm("請確認你是這個舊行程原本的統籌人。確認後，此行程會綁定目前瀏覽器的匿名身份。")) return;
-    try {
-      btn.disabled = true;
-      await claimLegacyTrip();
-    } catch (err) {
-      console.error(err);
-      toast("資料銜接失敗，請先確認 Firebase 規則仍允許舊資料遷移");
-      btn.disabled = false;
-    }
-  };
-}
-
-// 「申請編輯權限」按鈕的行為
 function attachRequestAccessHandler(btn) {
   if (!btn) return;
   btn.onclick = async () => {
@@ -1734,21 +1709,13 @@ function attachRequestAccessHandler(btn) {
 // ------------------------------------------------------------
 function renderAccessGate() {
   const root = document.getElementById("app-root");
-  const legacy = isLegacyTrip();
   root.innerHTML = `
     <div class="card" style="text-align:center;padding:36px 20px;">
       <h3 style="margin-top:0;">🔒 尚未綁定此行程的成員身份</h3>
-      ${legacy ? `
-        <p style="color:var(--text-muted);">這是舊版行程資料，尚未綁定新的身份權限。若你是原統籌人，請進行資料銜接。</p>
-        <button class="primary-btn" id="claim-legacy-trip-btn">我是原統籌人，進行資料銜接</button>
-      ` : `
-        <p style="color:var(--text-muted);">${state.openedViaInvite ? "你是透過邀請連結進入此行程。" : ""}行程內容僅限成員查看。請按下方按鈕向統籌人提出申請，核准後就能看到行程內容。</p>
-        <button class="primary-btn" id="request-edit-access-btn">申請加入此行程</button>
-        <p style="font-size:12px;color:var(--text-muted);margin-top:14px;">也可以在左側選單點「顯示目前裝置 UID」，把 UID 傳給統籌人，由統籌人手動幫你綁定。</p>
-      `}
+      <p style="color:var(--text-muted);">你可以透過有效的邀請連結申請加入此行程。為保護成員名單與 UID，未綁定使用者不再直接讀取行程主文件。</p>
+      ${state.openedViaInvite && state.inviteCode ? `<button class="primary-btn" id="request-edit-access-btn">申請加入此行程</button>` : `<p style="margin-bottom:0;color:var(--text-muted);font-size:13px;">請向行程統籌人索取最新邀請連結後再進入。</p>`}
     </div>
   `;
-  attachClaimLegacyHandler(document.getElementById("claim-legacy-trip-btn"));
   attachRequestAccessHandler(document.getElementById("request-edit-access-btn"));
 }
 
@@ -1784,12 +1751,11 @@ function renderTripHome() {
       <button class="tab-btn ${state.tripSection === "itinerary" ? "active" : ""}" id="tab-itinerary">📅 行程</button>
       <button class="tab-btn ${state.tripSection === "expenses" ? "active" : ""}" id="tab-expenses">💰 記帳與分帳</button>
     </div>
-    ${isLegacyTrip() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>這是舊版行程資料，目前尚未綁定新的身份權限。</span><button class="secondary-btn small-btn" id="claim-legacy-trip-btn">我是原統籌人，進行資料銜接</button></div>` : (!canEditItinerary() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>你目前是唯讀身份，可以瀏覽行程與記帳內容，並在許願池留言，但無法新增或編輯行程內容與記帳。</span><button class="secondary-btn small-btn" id="request-edit-access-btn">申請編輯權限</button></div>` : "")}
+    ${!canEditItinerary() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>你目前是唯讀身份，可以瀏覽行程與記帳內容，並在許願池留言，但無法新增或編輯行程內容與記帳。</span><button class="secondary-btn small-btn" id="request-edit-access-btn">申請編輯權限</button></div>` : "")}
     <div id="day-selector-wrap"></div>
     <div id="day-content"></div>
   `;
 
-  attachClaimLegacyHandler(document.getElementById("claim-legacy-trip-btn"));
   attachRequestAccessHandler(document.getElementById("request-edit-access-btn"));
 
   document.getElementById("tab-itinerary").onclick = () => navigate(`#/trip/${state.tripId}${state.currentDayId ? "/day/" + state.currentDayId : ""}`);
