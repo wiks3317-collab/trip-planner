@@ -1010,7 +1010,7 @@ document.getElementById("share-btn").addEventListener("click", () => {
 });
 
 // ------------------------------------------------------------
-// 邀請連結（可設定到期時間、可撤銷，多組並存）
+// 邀請連結（可設定到期時間、次數上限，撤銷後可永久刪除，多組並存）
 // 對照表存兩份：shortlinks/{code} 是給任何人用代碼查詢用的公開解析表（不可列出所有代碼）；
 // trips/{tripId}/inviteLinks/{code} 是給統籌人在「管理成員與權限」列出/管理自己行程邀請連結用的鏡像資料。
 // 兩份用同一組 code 當文件 ID，撤銷／改期限時會同時更新。
@@ -1062,10 +1062,10 @@ async function loadInviteLinks() {
   }
 }
 
-async function setInviteLinkRevoked(code, revoked) {
+async function deleteInviteLink(code) {
   const batch = writeBatch(db);
-  batch.update(doc(db, "shortlinks", code), { revoked });
-  batch.update(doc(db, "trips", state.tripId, "inviteLinks", code), { revoked });
+  batch.delete(doc(db, "shortlinks", code));
+  batch.delete(doc(db, "trips", state.tripId, "inviteLinks", code));
   await batch.commit();
 }
 
@@ -1166,7 +1166,7 @@ async function renderShareTripModal() {
         </div>`;
     }).join("") : `<p style="font-size:13px;color:var(--text-muted);">目前沒有可用的邀請連結，請先建立一組。</p>`}
     <button class="primary-btn full-width" id="create-share-invite-btn" style="margin-top:10px;">＋ 建立新的邀請連結（永久有效）</button>
-    <button class="secondary-btn full-width" id="goto-invite-manage-btn" style="margin-top:8px;">⚙️ 設定到期時間／撤銷連結</button>
+    <button class="secondary-btn full-width" id="goto-invite-manage-btn" style="margin-top:8px;">⚙️ 設定到期時間／刪除連結</button>
     <div class="form-actions">
       ${navigator.share && active.length ? `<button class="secondary-btn" id="native-share-btn">📤 用系統分享</button>` : ""}
       <button class="primary-btn" id="share-close-btn">完成</button>
@@ -1502,7 +1502,13 @@ async function importSyncCode(rawCode) {
     // 不是舊格式，當作新版的 Firestore 短代碼繼續查詢
   }
   renderLoading();
-  const data = await getShortlinkData(rawCode);
+  const normalizedCode = String(rawCode).trim().toUpperCase();
+  const data = await getShortlinkData(normalizedCode);
+  if (data && data.type === "sync" && normalizedCode.length === 6) {
+    toast("這是舊版 6 碼同步連結，已停止使用，請重新產生 12 碼同步連結");
+    navigate("");
+    return;
+  }
   if (!data || data.type !== "sync" || !Array.isArray(data.list)) {
     toast("同步代碼無效或已失效，請確認複製完整");
     navigate("");
@@ -3158,9 +3164,7 @@ function renderManageMembersModal() {
             <button class="secondary-btn small-btn save-invite-expiry-btn" data-code="${link.id}" ${status === "revoked" ? "disabled" : ""}>更新到期時間</button>
             <input type="number" min="1" max="10000" class="invite-maxuses-input" data-code="${link.id}" value="${link.maxUses || ""}" placeholder="次數上限" style="width:110px;padding:6px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;" ${status === "revoked" ? "disabled" : ""}>
             <button class="secondary-btn small-btn save-invite-maxuses-btn" data-code="${link.id}" ${status === "revoked" ? "disabled" : ""}>更新次數上限</button>
-            ${status === "revoked"
-              ? `<button class="secondary-btn small-btn restore-invite-btn" data-code="${link.id}">恢復啟用</button>`
-              : `<button class="danger-btn small-btn revoke-invite-btn" data-code="${link.id}">撤銷</button>`}
+            <button class="danger-btn small-btn delete-invite-btn" data-code="${link.id}">${status === "revoked" ? "刪除" : "撤銷並刪除"}</button>
           </div>
         </div>`;
     }).join("");
@@ -3202,31 +3206,22 @@ function renderManageMembersModal() {
         }
       });
     });
-    listWrap.querySelectorAll(".revoke-invite-btn").forEach((btn) => {
+    listWrap.querySelectorAll(".delete-invite-btn").forEach((btn) => {
       btn.addEventListener("click", async () => {
-        if (!confirm("確定要撤銷這組邀請連結嗎？撤銷後這個連結將無法再使用。")) return;
+        const link = links.find((x) => x.id === btn.dataset.code);
+        const status = link ? inviteLinkStatus(link) : "active";
+        const msg = status === "active"
+          ? "確定要撤銷並刪除這組邀請連結嗎？\n刪除後網址將立即失效，且無法恢復。"
+          : "確定要永久刪除這組邀請連結嗎？\n刪除後無法恢復。";
+        if (!confirm(msg)) return;
         btn.disabled = true;
         try {
-          await setInviteLinkRevoked(btn.dataset.code, true);
-          toast("已撤銷邀請連結");
+          await deleteInviteLink(btn.dataset.code);
+          toast("已刪除邀請連結，網址已失效");
           await renderInviteLinksList();
         } catch (err) {
           console.error(err);
-          toast("撤銷失敗，請稍後再試");
-          btn.disabled = false;
-        }
-      });
-    });
-    listWrap.querySelectorAll(".restore-invite-btn").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        btn.disabled = true;
-        try {
-          await setInviteLinkRevoked(btn.dataset.code, false);
-          toast("已恢復啟用");
-          await renderInviteLinksList();
-        } catch (err) {
-          console.error(err);
-          toast("恢復失敗，請稍後再試");
+          toast("刪除失敗，請稍後再試");
           btn.disabled = false;
         }
       });
