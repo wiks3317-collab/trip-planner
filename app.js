@@ -1,26 +1,16 @@
 // ============================================================
-// 管理員後台 - admin.js
-// 與一般使用者頁面（app.js）完全分開的獨立程式。
-// 這裡不會、也不需要引用 app.js 的任何東西（複製了少數幾個同名的小工具函式，
-// 例如 escapeHtml／renderBlockView，避免兩邊互相依賴）。
+// 旅行行程規劃工具 - app.js
+// 純前端 + Firebase Firestore（即時同步資料庫）
 // ============================================================
 
-import { db, auth, adminSignIn, adminSignOut, onAuthStateChanged } from "./admin-firebase-config.js";
+import { db, auth, authReady } from "./firebase-config.js";
 import {
-  collection, doc, getDoc, getDocs, updateDoc, query, orderBy, serverTimestamp, writeBatch, runTransaction, limit, Timestamp,
+  collection, doc, getDoc, getDocs, setDoc, addDoc, updateDoc, deleteDoc,
+  onSnapshot, query, orderBy, serverTimestamp, writeBatch, runTransaction, Timestamp,
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 
-const root = document.getElementById("admin-root");
-
-let currentUser = null;
-let tripsCache = [];
-let adminCanEdit = false;
-let adminCanManageMembers = false;
-let lastSignInAt = 0;
-let detailCtx = null;
-
 // ------------------------------------------------------------
-// 小工具（獨立複製一份，不依賴 app.js）
+// 小工具
 // ------------------------------------------------------------
 function escapeHtml(str) {
   if (str === null || str === undefined) return "";
@@ -32,1108 +22,3379 @@ function escapeHtml(str) {
     .replace(/'/g, "&#039;");
 }
 
-function fmtDate(ts) {
-  try {
-    if (!ts) return "（無資料）";
-    const d = typeof ts.toDate === "function" ? ts.toDate() : new Date(ts);
-    return d.toLocaleString("zh-Hant-TW", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-  } catch {
-    return "（無資料）";
-  }
+// 產生 Google 地圖連結：
+// - normalizeMapLink：把使用者貼的「Google地圖連結」欄位轉成可用的網址（沒帶 https:// 也會自動補上）
+// - mapSearchLink：把「地址／地點」關鍵字組成 Google 地圖搜尋連結
+// - resolveMapHref：連結優先，沒有連結才退回用地址／地點搜尋，再沒有才用最後的 fallback 文字搜尋
+function normalizeMapLink(url) {
+  const raw = (url || "").trim();
+  if (!raw) return null;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  return `https://${raw}`;
+}
+function mapSearchLink(query) {
+  const raw = (query || "").trim();
+  if (!raw) return null;
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(raw)}`;
+}
+function resolveMapHref(linkValue, addressValue, fallbackText) {
+  return normalizeMapLink(linkValue) || mapSearchLink(addressValue) || mapSearchLink(fallbackText);
+}
+
+function newLocalId() {
+  return doc(collection(db, "_ids")).id;
+}
+
+function toast(msg) {
+  const container = document.getElementById("toast-container");
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.textContent = msg;
+  container.appendChild(el);
+  setTimeout(() => el.remove(), 2600);
 }
 
 function fmtMoney(cents) {
-  const v = Math.round(cents || 0) / 100;
+  const v = Math.round(cents) / 100;
   return v.toLocaleString("zh-Hant-TW", { maximumFractionDigits: 0 });
 }
 
-function permissionLabel(p) {
-  if (p === "owner") return "統籌人";
-  if (p === "editor") return "可編輯";
-  if (p === "viewer") return "唯讀";
-  return p || "—";
-}
-
-// 內容區塊（文字／圖片／表格）唯讀渲染，對應 app.js 的 renderBlockView，
-// 只給管理後台的唯讀檢視用，沒有任何編輯功能。
-function renderBlockView(block) {
-  if (!block) return "";
-  if (block.type === "text") {
-    return `<div class="admin-block-text">${escapeHtml(block.content)}</div>`;
-  }
-  if (block.type === "image") {
-    return `<figure class="admin-block-image"><img src="${escapeHtml(block.url)}" alt="${escapeHtml(block.caption || "")}" loading="lazy">${block.caption ? `<figcaption>${escapeHtml(block.caption)}</figcaption>` : ""}</figure>`;
-  }
-  if (block.type === "table") {
-    const rows = block.rows || [];
-    return `<div class="admin-block-table"><table>${rows.map((row, ri) => `<tr>${row.map((c) => ri === 0 ? `<th>${escapeHtml(c)}</th>` : `<td>${escapeHtml(c)}</td>`).join("")}</tr>`).join("")}</table></div>`;
-  }
-  return "";
-}
-
-function render(html) {
-  root.innerHTML = html;
-}
-
 // ------------------------------------------------------------
-// 登入前／非管理員畫面
+// 幣別
 // ------------------------------------------------------------
-function renderSignedOut() {
-  render(`
-    <div class="admin-card">
-      <h1>行程規劃工具 · 管理後台</h1>
-      <p class="admin-muted">這裡只給系統管理員使用，一般行程請直接用行程連結開啟，不需要從這裡登入。</p>
-      <button id="admin-signin-btn" class="admin-primary-btn">使用 Google 帳號登入</button>
-    </div>
-  `);
-  document.getElementById("admin-signin-btn").onclick = async () => {
+const CURRENCY_OPTIONS = [
+  { code: "TWD", label: "新台幣" },
+  { code: "JPY", label: "日圓" },
+  { code: "USD", label: "美金" },
+  { code: "EUR", label: "歐元" },
+  { code: "KRW", label: "韓元" },
+  { code: "CNY", label: "人民幣" },
+  { code: "HKD", label: "港幣" },
+  { code: "THB", label: "泰銖" },
+  { code: "GBP", label: "英鎊" },
+  { code: "AUD", label: "澳幣" },
+  { code: "SGD", label: "新加坡幣" },
+  { code: "MYR", label: "馬來西亞幣" },
+  { code: "PHP", label: "菲律賓披索" },
+  { code: "VND", label: "越南盾" },
+  { code: "IDR", label: "印尼盾" },
+  { code: "MOP", label: "澳門幣" },
+  { code: "CAD", label: "加拿大幣" },
+  { code: "CHF", label: "瑞士法郎" },
+];
+function currencyLabel(code) {
+  const c = CURRENCY_OPTIONS.find((x) => x.code === code);
+  return c ? `${c.code} ${c.label}` : code;
+}
+function tripCurrencies() {
+  const list = state.trip && state.trip.currencies;
+  return list && list.length ? list : ["TWD"];
+}
+function fmtCurrencyAmt(cents, currency) {
+  const v = fmtMoney(cents);
+  return currency === "TWD" ? `NT$${v}` : `${currency} $${v}`;
+}
+
+// 用 fawazahmed0/currency-api（免費、無需金鑰、支援歷史日期）查詢某天的匯率
+// 回傳：1 單位 fromCurrency 兌換成多少 TWD；查不到則回傳 null
+async function fetchExchangeRate(dateStr, fromCurrency) {
+  if (fromCurrency === "TWD") return 1;
+  const from = fromCurrency.toLowerCase();
+  const dateSeg = dateStr || "latest";
+  const urls = [
+    `https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@${dateSeg}/v1/currencies/${from}.json`,
+    `https://${dateSeg}.currency-api.pages.dev/v1/currencies/${from}.json`,
+  ];
+  for (const url of urls) {
     try {
-      await adminSignIn();
-    } catch (err) {
-      console.error(err);
-      render(`
-        <div class="admin-card">
-          <h1>登入失敗</h1>
-          <p class="admin-muted">${escapeHtml(err.message || String(err))}</p>
-          <button id="admin-retry-btn" class="admin-secondary-btn">重試</button>
-        </div>
-      `);
-      document.getElementById("admin-retry-btn").onclick = () => renderSignedOut();
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 6000);
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timer);
+      if (!res.ok) continue;
+      const data = await res.json();
+      const rate = data[from] && data[from].twd;
+      if (typeof rate === "number") return rate;
+    } catch {
+      // 試下一個備援網址
     }
-  };
-}
-
-function renderNotAdmin(user) {
-  render(`
-    <div class="admin-card">
-      <h1>沒有管理員權限</h1>
-      <p class="admin-muted">
-        已用 Google 帳號「${escapeHtml(user.email || "")}」登入，
-        但這個帳號的 UID 還沒被加進 <code>admins</code> 集合，所以無法查看管理後台。
-      </p>
-      <p>你的 UID（把這串貼到 Firebase Console 的 <code>admins</code> 集合，當作文件 ID）：</p>
-      <div class="admin-uid-box">${escapeHtml(user.uid)}</div>
-      <button id="admin-signout-btn" class="admin-secondary-btn">登出</button>
-    </div>
-  `);
-  document.getElementById("admin-signout-btn").onclick = () => adminSignOut();
-}
-
-// ------------------------------------------------------------
-// 行程清單（摘要）
-// ------------------------------------------------------------
-function dashboardShellHtml(user) {
-  return `
-    <div class="admin-card">
-      <div class="admin-topbar">
-        <div>
-          <h1>管理後台</h1>
-          <p class="admin-muted">登入身份：${escapeHtml(user.email || user.uid)}</p>
-        </div>
-        <button id="admin-signout-btn" class="admin-secondary-btn">登出</button>
-      </div>
-      <div class="admin-row-actions" style="margin:8px 0;"><button class="admin-secondary-btn" data-act="audit">📜 稽核紀錄</button><button class="admin-secondary-btn" data-act="backup-all" id="admin-backup-btn">💾 匯出全部行程備份</button></div>
-      ${adminCanEdit ? `<div style="border-top:1px dashed var(--border,#DCE3DC);margin:14px 0;padding-top:12px;"><strong>🧹 舊版 6 碼連結清理</strong><p class="admin-muted" style="margin:4px 0 8px;">舊版邀請／跨裝置同步代碼不再使用。由於跨裝置同步代碼沒有隸屬特定行程，系統不會列出全部同步資料；請貼上已知的 6 碼代碼後刪除。舊版邀請連結則會在個別行程內直接顯示。</p><div class="admin-row-actions"><input id="legacy-shortlink-code" maxlength="6" placeholder="輸入舊版 6 碼代碼" style="padding:8px 10px;border:1px solid var(--border,#DCE3DC);border-radius:8px;font:inherit;text-transform:uppercase;letter-spacing:2px;width:190px;"><button class="admin-secondary-btn" data-act="legacy-shortlink-delete">🗑️ 刪除舊版連結</button></div></div>` : ""}
-      <p class="admin-muted">
-        「檢視內容」會用管理員身份直接顯示天數、景點、許願池留言與記帳明細，不需要先加入該行程。
-        「停用」會讓所有成員（含統籌人）都無法再檢視或編輯行程內容，只有管理員能恢復。
-      </p>
-      <div class="admin-row-actions" style="margin:8px 0;"><input id="admin-search" type="search" placeholder="搜尋行程名稱或 ID" style="flex:1;min-width:160px;padding:8px 10px;border:1px solid var(--border,#DCE3DC);border-radius:8px;font:inherit;"><select id="admin-filter" style="padding:8px;border-radius:8px;border:1px solid var(--border,#DCE3DC);font:inherit;"><option value="all">全部</option><option value="active">啟用中</option><option value="disabled">已停用</option><option value="deleted">已刪除</option></select></div>
-      <div id="admin-trips-status" class="admin-muted hidden"></div>
-      <div class="admin-table-scroll">
-        <table class="admin-table" id="admin-trips-table">
-          <thead>
-            <tr>
-              <th>行程名稱</th>
-              <th>成員數</th>
-              <th>建立時間</th>
-              <th>狀態</th>
-              <th>行程 ID</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody id="admin-trips-tbody"></tbody>
-        </table>
-      </div>
-    </div>
-  `;
-}
-
-function showTripList(user) {
-  render(dashboardShellHtml(user));
-  document.getElementById("admin-signout-btn").onclick = () => adminSignOut();
-  renderTripsTable();
-}
-
-function renderTripsTable() {
-  const tbodyEl = document.getElementById("admin-trips-tbody");
-  if (!tbodyEl) return;
-  const searchEl = document.getElementById("admin-search");
-  const filterEl = document.getElementById("admin-filter");
-  if (searchEl && !searchEl.dataset.bound) {
-    searchEl.dataset.bound = "1";
-    searchEl.oninput = renderTripsTable;
-    filterEl.onchange = renderTripsTable;
   }
-  const kw = (searchEl?.value || "").trim().toLowerCase();
-  const st = filterEl?.value || "all";
-  const rows = tripsCache.filter((t) =>
-    (st === "deleted" ? t.deleted === true : t.deleted !== true && (st === "all" || (st === "disabled") === (t.disabled === true))) &&
-    (!kw || (t.name || "").toLowerCase().includes(kw) || t.id.toLowerCase().includes(kw)));
-  tbodyEl.innerHTML = rows.map((t) => `
-    <tr>
-      <td data-label="行程名稱">${escapeHtml(t.name || "（未命名）")}<div class="admin-muted" style="font-size:12px;">統籌人：${escapeHtml(ownerNames(t))}</div></td>
-      <td data-label="成員數">${Array.isArray(t.members) ? t.members.length : "—"}</td>
-      <td data-label="建立時間">${fmtDate(t.createdAt)}</td>
-      <td data-label="狀態">${t.deleted === true ? '<span class="admin-badge admin-badge-disabled">已刪除</span>' : t.disabled === true ? '<span class="admin-badge admin-badge-disabled">已停用</span>' : '<span class="admin-badge admin-badge-active">啟用中</span>'}</td>
-      <td data-label="行程 ID"><code>${escapeHtml(t.id)}</code></td>
-      <td data-label="操作" class="admin-row-actions">
-        <button class="admin-link-btn" data-action="detail" data-tripid="${escapeHtml(t.id)}">檢視內容</button>
-        <a class="admin-link" href="./index.html#/trip/${encodeURIComponent(t.id)}" target="_blank" rel="noopener">開啟行程 →</a>
-        ${t.deleted === true ? "" : `<button class="admin-link-btn admin-danger" data-action="toggle" data-tripid="${escapeHtml(t.id)}">${t.disabled === true ? "恢復啟用" : "停用"}</button>`}
-        ${adminCanEdit ? `<button class="admin-link-btn admin-danger" data-action="softdel" data-tripid="${escapeHtml(t.id)}">${t.deleted === true ? "還原" : "刪除"}</button>` : ""}
-      </td>
-    </tr>
-  `).join("");
-
-  tbodyEl.querySelectorAll('[data-action="detail"]').forEach((btn) => {
-    btn.onclick = () => showTripDetail(btn.dataset.tripid);
-  });
-  tbodyEl.querySelectorAll('[data-action="toggle"]').forEach((btn) => {
-    btn.onclick = () => toggleTripDisabled(btn.dataset.tripid).then(() => renderTripsTable());
-  });
-  tbodyEl.querySelectorAll('[data-action="softdel"]').forEach((btn) => {
-    btn.onclick = () => toggleTripDeleted(btn.dataset.tripid).then(() => renderTripsTable());
-  });
+  return null;
 }
 
-async function renderDashboard(user) {
-  currentUser = user;
-  render(dashboardShellHtml(user));
-  document.getElementById("admin-signout-btn").onclick = () => adminSignOut();
+function fmtDateTime(ts) {
+  if (!ts) return "";
+  const d = ts.toDate ? ts.toDate() : new Date(ts);
+  return d.toLocaleString("zh-Hant-TW", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
 
-  const statusEl = document.getElementById("admin-trips-status");
-  statusEl.classList.remove("hidden");
-  statusEl.textContent = "載入行程清單中...";
+function todayStr() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
 
+// ------------------------------------------------------------
+// localStorage 輔助（記住「我在這個裝置上是誰」與「我看過哪些行程」）
+// ------------------------------------------------------------
+const LS_MY_TRIPS = "tp_my_trips";       // [{id, name}]
+
+function getMyTrips() {
   try {
-    const snap = await getDocs(collection(db, "trips"));
-    tripsCache = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-    tripsCache.sort((a, b) => {
-      const ta = a.createdAt?.toMillis ? a.createdAt.toMillis() : 0;
-      const tb = b.createdAt?.toMillis ? b.createdAt.toMillis() : 0;
-      return tb - ta;
-    });
+    return JSON.parse(localStorage.getItem(LS_MY_TRIPS) || "[]");
+  } catch {
+    return [];
+  }
+}
+function saveMyTrip(id, name) {
+  const list = getMyTrips().filter((t) => t.id !== id);
+  list.unshift({ id, name });
+  localStorage.setItem(LS_MY_TRIPS, JSON.stringify(list.slice(0, 30)));
+}
+function updateMyTripName(id, name) {
+  const list = getMyTrips();
+  const item = list.find((t) => t.id === id);
+  if (item) {
+    item.name = name;
+    localStorage.setItem(LS_MY_TRIPS, JSON.stringify(list));
+  }
+}
+function removeMyTrip(id) {
+  localStorage.setItem(LS_MY_TRIPS, JSON.stringify(getMyTrips().filter((t) => t.id !== id)));
+}
+function currentUid() {
+  return auth.currentUser?.uid || null;
+}
 
-    if (tripsCache.length === 0) {
-      statusEl.textContent = "目前 Firestore 裡還沒有任何行程。";
-      return;
+function memberUids(member) {
+  let raw = member?.uids;
+  // 相容 Firebase Console 可能誤存成 JSON 字串的情況：
+  // "[\"uidA\",\"uidB\"]" -> ["uidA", "uidB"]
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      raw = Array.isArray(parsed) ? parsed : [raw];
+    } catch {
+      raw = raw.trim() ? [raw] : [];
     }
+  }
+  const values = Array.isArray(raw) ? [...raw] : [];
+  if (member?.uid && !values.includes(member.uid)) values.unshift(member.uid);
+  return [...new Set(values.filter((uid) => typeof uid === "string" && uid.trim()))];
+}
 
-    statusEl.classList.add("hidden");
-    renderTripsTable();
-  } catch (err) {
-    console.error(err);
-    statusEl.classList.remove("hidden");
-    statusEl.textContent = "載入行程清單失敗：" + (err.message || String(err)) +
-      "（如果剛部署新的 firestore.rules，請確認已在 Firebase Console 按「發布」）";
+// ------------------------------------------------------------
+// 外觀設定（顏色 / 字型 / 字級）— 存在裝置本機，套用到整個網頁
+// ------------------------------------------------------------
+const LS_APPEARANCE = "tp_appearance";
+
+const THEME_PRESETS = [
+  { id: "ocean", name: "海洋藍", primary: "#0E6B64", primaryDark: "#0A5450", accent: "#D98E2B", bg: "#EEF3F0" },
+  { id: "dusk", name: "薄暮紫", primary: "#5B4B8A", primaryDark: "#453873", accent: "#E8A33D", bg: "#F2EFF7" },
+  { id: "forest", name: "山林綠", primary: "#2F6B3A", primaryDark: "#23512C", accent: "#C97B2E", bg: "#EFF4EC" },
+  { id: "wheat", name: "麥浪黃", primary: "#B9840F", primaryDark: "#8F6608", accent: "#0E6B64", bg: "#F6F1E6" },
+  { id: "slate", name: "石板灰", primary: "#3B5166", primaryDark: "#2C3D4D", accent: "#C9A227", bg: "#EEF0F2" },
+];
+
+const FONT_PRESETS = [
+  { id: "journal", name: "手札質感", heading: '"LXGW WenKai TC", "Noto Serif TC", serif', body: '"Noto Sans TC", sans-serif' },
+  { id: "modern", name: "現代俐落", heading: '"Noto Sans TC", sans-serif', body: '"Noto Sans TC", sans-serif' },
+  { id: "refined", name: "細緻雅致", heading: '"Noto Serif TC", serif', body: '"Noto Sans TC", sans-serif' },
+];
+
+const SIZE_PRESETS = [
+  { id: "sm", name: "小", px: "15px" },
+  { id: "md", name: "中", px: "16px" },
+  { id: "lg", name: "大", px: "18px" },
+];
+
+function loadAppearance() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LS_APPEARANCE) || "{}");
+    return {
+      themeId: saved.themeId || "ocean",
+      fontId: saved.fontId || "journal",
+      sizeId: saved.sizeId || "md",
+    };
+  } catch {
+    return { themeId: "ocean", fontId: "journal", sizeId: "md" };
+  }
+}
+function saveAppearance(settings) {
+  localStorage.setItem(LS_APPEARANCE, JSON.stringify(settings));
+}
+function applyAppearance(settings) {
+  const theme = THEME_PRESETS.find((t) => t.id === settings.themeId) || THEME_PRESETS[0];
+  const font = FONT_PRESETS.find((f) => f.id === settings.fontId) || FONT_PRESETS[0];
+  const size = SIZE_PRESETS.find((s) => s.id === settings.sizeId) || SIZE_PRESETS[1];
+  const root = document.documentElement.style;
+  root.setProperty("--primary", theme.primary);
+  root.setProperty("--primary-dark", theme.primaryDark);
+  root.setProperty("--accent", theme.accent);
+  root.setProperty("--bg", theme.bg);
+  root.setProperty("--font-heading", font.heading);
+  root.setProperty("--font-body", font.body);
+  root.setProperty("--base-font-size", size.px);
+}
+
+// 一載入就先套用外觀設定，讓載入畫面也是對的樣式
+applyAppearance(loadAppearance());
+
+// ------------------------------------------------------------
+// 行程背景圖片（存在 Firestore 的行程資料裡，所以每個看行程的人都會看到同一張）
+// ------------------------------------------------------------
+function applyTripBackground(url, dim) {
+  const layer = document.getElementById("bg-image-layer");
+  if (url) {
+    const d = Math.min(Math.max(dim ?? 30, 0), 85) / 100;
+    layer.style.backgroundImage = `linear-gradient(rgba(0,0,0,${d}), rgba(0,0,0,${d})), url("${url.replace(/"/g, '\\"')}")`;
+    document.body.classList.add("has-bg-image");
+  } else {
+    layer.style.backgroundImage = "";
+    document.body.classList.remove("has-bg-image");
   }
 }
 
 // ------------------------------------------------------------
-// 停用／恢復啟用
+// 全域狀態
 // ------------------------------------------------------------
-async function toggleTripDisabled(tripId) {
-  const trip = tripsCache.find((t) => t.id === tripId);
-  if (!trip) return false;
-  const nextDisabled = trip.disabled !== true;
-  const confirmMsg = nextDisabled
-    ? `確定要停用行程「${trip.name || tripId}」嗎？\n停用後，所有成員（含統籌人）都無法再檢視或編輯內容，只有管理員能恢復。`
-    : `確定要恢復啟用行程「${trip.name || tripId}」嗎？\n恢復後，原本的成員與權限會照舊生效。`;
-  if (!window.confirm(confirmMsg)) return false;
+const state = {
+  tripId: null,
+  trip: null,          // { id, name, members:[{id,name,permission}], ... }
+  days: [],             // [{id, title, date, order, blocks}]
+  currentDayId: null,
+  spots: [],            // spots of currentDayId
+  currentSpotId: null,
+  currentSpot: null,
+  wishes: [],
+  expenses: [],
+  tripSection: "itinerary", // 'itinerary' | 'expenses'
+  openedViaInvite: false, // 是否由邀請連結進入
+  inviteCode: null, // 透過哪一組邀請連結代碼進入（用來計算該連結的使用次數）
+  unsub: {},             // active onSnapshot unsubscribe fns, keyed
+};
 
-  try {
-    let reason = "";
-    if (nextDisabled) {
-      const input = window.prompt("停用原因（選填，會顯示在管理後台）：", "");
-      if (input === null) return false;
-      reason = input.trim().slice(0, 300);
+function clearUnsub(key) {
+  if (state.unsub[key]) {
+    state.unsub[key]();
+    delete state.unsub[key];
+  }
+}
+function clearAllUnsub() {
+  Object.keys(state.unsub).forEach(clearUnsub);
+}
+
+function myMember() {
+  if (!state.trip || !currentUid()) return null;
+  // 權限以 Firebase Authentication 的 UID 綁定，不再採用前端自行選擇的 memberId。
+  return (state.trip.members || []).find((m) => memberUids(m).includes(currentUid())) || null;
+}
+function normalizePermission(permission) {
+  return ["owner", "editor", "viewer"].includes(permission) ? permission : "viewer_unset";
+}
+
+function myPermission() {
+  const m = myMember();
+  return m ? normalizePermission(m.permission) : "viewer_unset"; // 尚未綁定身份或資料異常 -> 視同唯讀
+}
+function canEditItinerary() {
+  const p = myPermission();
+  return p === "owner" || p === "editor";
+}
+function isOwner() {
+  return myPermission() === "owner";
+}
+// 是否已綁定此行程的成員身份（UID 對應到成員）。未綁定者看不到天數／景點／記帳內容。
+function canViewContent() {
+  return !!myMember();
+}
+
+// ------------------------------------------------------------
+// Modal 系統
+// ------------------------------------------------------------
+function openModal(titleHtml, bodyHtml) {
+  const overlay = document.getElementById("modal-overlay");
+  const box = document.getElementById("modal-box");
+  box.innerHTML = `<div class="modal-title">${titleHtml}</div>${bodyHtml}`;
+  overlay.classList.remove("hidden");
+}
+function closeModal() {
+  document.getElementById("modal-overlay").classList.add("hidden");
+  document.getElementById("modal-box").innerHTML = "";
+}
+document.getElementById("modal-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "modal-overlay") closeModal();
+});
+
+// ------------------------------------------------------------
+// 景點詳細面板（彈出式，取代整頁跳轉）
+// ------------------------------------------------------------
+function showSpotPanel() {
+  document.getElementById("spot-panel-overlay").classList.remove("hidden");
+}
+function hideSpotPanel() {
+  document.getElementById("spot-panel-overlay").classList.add("hidden");
+  document.getElementById("spot-panel-content").innerHTML = "";
+  clearUnsub("spot");
+  clearUnsub("wishes");
+}
+function closeSpotPanel() {
+  // 沿用路由，這樣網址列、上一頁鍵都會維持正確狀態
+  navigate(`#/trip/${state.tripId}/day/${state.currentDayId}`);
+}
+document.getElementById("spot-panel-close").addEventListener("click", closeSpotPanel);
+document.getElementById("spot-panel-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "spot-panel-overlay") closeSpotPanel();
+});
+
+// ------------------------------------------------------------
+// 路由
+// ------------------------------------------------------------
+function navigate(hash) {
+  if (window.location.hash === hash) {
+    route();
+  } else {
+    window.location.hash = hash;
+  }
+}
+window.addEventListener("hashchange", route);
+
+function parseHash() {
+  // #/trip/TRIPID
+  // #/trip/TRIPID/day/DAYID
+  // #/trip/TRIPID/day/DAYID/spot/SPOTID
+  // #/trip/TRIPID/expenses
+  // #/import/CODE
+  // #/s/CODE  （分享行程用的短代碼）
+  const h = window.location.hash.replace(/^#\/?/, "");
+  const parts = h.split("/").filter(Boolean);
+  const result = {};
+  if (parts[0] === "import" && parts[1]) {
+    result.importCode = decodeURIComponent(parts[1]);
+    return result;
+  }
+  if (parts[0] === "s" && parts[1]) {
+    result.shortCode = decodeURIComponent(parts[1]);
+    return result;
+  }
+  if (parts[0] === "trip" && parts[1]) {
+    result.tripId = parts[1];
+    if (parts[2] === "day" && parts[3]) {
+      result.dayId = parts[3];
+      if (parts[4] === "spot" && parts[5]) {
+        result.spotId = parts[5];
+      }
+    } else if (parts[2] === "expenses") {
+      result.expenses = true;
     }
-    const upd = nextDisabled
-      ? { disabled: true, disabledAt: serverTimestamp(), disabledBy: currentUser?.uid || null, disabledReason: reason }
-      : { disabled: false, disabledAt: null, disabledBy: currentUser?.uid || null, disabledReason: "" };
-    await commitWithAudit(tripId, nextDisabled ? "disable" : "enable", { reason }, (b) => b.update(doc(db, "trips", tripId), upd));
-    Object.assign(trip, upd);
-    return true;
-  } catch (err) {
-    console.error(err);
-    window.alert("操作失敗：" + (err.message || String(err)));
-    return false;
+  }
+  return result;
+}
+
+async function route() {
+  const r = parseHash();
+
+  if (r.importCode) {
+    importSyncCode(r.importCode);
+    return;
+  }
+
+  if (r.shortCode) {
+    resolveTripShortCode(r.shortCode);
+    return;
+  }
+
+  if (!r.tripId) {
+    clearAllUnsub();
+    state.tripId = null;
+    state.trip = null;
+    applyTripBackground(null);
+    hideSpotPanel();
+    renderWelcome();
+    renderTripMenu();
+    updateHeader();
+    return;
+  }
+
+  if (state.tripId !== r.tripId) {
+    await loadTrip(r.tripId);
+  }
+
+  state.tripSection = r.expenses ? "expenses" : "itinerary";
+  state.currentDayId = r.dayId || state.currentDayId;
+  state.currentSpotId = r.spotId || null;
+
+  if (!state.trip) {
+    // 行程還在載入或不存在
+    return;
+  }
+
+  // 行程已被管理員軟刪除：從本機「我的行程」移除，只顯示已刪除提示，不訂閱任何內容。
+  if (state.trip.deleted === true) removeMyTrip(state.tripId);
+
+  updateHeader();
+  renderTripMenu();
+
+  if (state.trip.deleted === true) {
+    stopContentSubscriptions();
+    hideSpotPanel();
+    renderTripDeleted();
+    return;
+  }
+
+  // 行程已被系統管理員停用：不論身份（含統籌人），一律不訂閱、不顯示內容，只顯示停用提示。
+  // 這只是畫面上的提示，真正擋下寫入的是 Firestore Rules（見 firestore.rules 的 tripActive）。
+  if (state.trip.disabled === true) {
+    stopContentSubscriptions();
+    hideSpotPanel();
+    renderTripDisabled();
+    return;
+  }
+
+  // 未綁定成員 UID 的訪客：不訂閱、不顯示任何天數／景點／記帳內容，只顯示申請畫面。
+  if (!canViewContent()) {
+    stopContentSubscriptions();
+    hideSpotPanel();
+    renderAccessGate();
+    return;
+  }
+  ensureContentSubscriptions();
+
+  if (state.tripSection === "expenses") {
+    hideSpotPanel();
+    subscribeExpenses();
+    renderExpensesPage();
+  } else if (r.spotId) {
+    renderTripHome(); // 讓面板底下的當天行程維持在畫面上
+    showSpotPanel();
+    subscribeSpot(r.dayId, r.spotId);
+  } else {
+    hideSpotPanel();
+    renderTripHome();
   }
 }
 
-// ------------------------------------------------------------
-// 行程完整內容（唯讀檢視）
-// ------------------------------------------------------------
-function ownerNames(trip) {
-  return (trip.members || []).filter((m) => m.permission === "owner").map((m) => m.name || "（未命名）").join("、") || "—";
+
+function ensureContentSubscriptions() {
+  if (!state.unsub.days) subscribeDays();
+}
+function stopContentSubscriptions() {
+  ["days", "spots", "spot", "wishes", "expenses"].forEach(clearUnsub);
+  spotsSubscribedDay = null;
+  state.days = [];
+  state.spots = [];
+  state.expenses = [];
+  state.wishes = [];
+  state.currentSpot = null;
 }
 
-// ------------------------------------------------------------
-// 稽核紀錄：所有管理員的寫入都跟一筆 adminAuditLogs 放在同一個 batch 裡一起提交
-// ------------------------------------------------------------
-// 刪除行程／改成員與 UID 屬於高風險操作，Rules 要求 15 分鐘內重新登入過。
-// 這裡先在前端擋一次、給清楚的提示，真正的把關仍在 Rules（recentlyAuthenticated()）。
-async function ensureRecentLogin(actionLabel) {
-  if (Date.now() - lastSignInAt < 14 * 60 * 1000) return true;
-  if (!window.confirm(`「${actionLabel}」屬於高風險操作，需要重新驗證身份。要現在用 Google 帳號重新登入一次嗎？`)) return false;
-  try {
-    const user = await adminSignIn();
-    lastSignInAt = Date.parse(user.metadata?.lastSignInTime || "") || Date.now();
-    return true;
-  } catch (err) {
-    console.error(err);
-    window.alert("重新登入失敗：" + (err.message || String(err)));
-    return false;
+async function resolveTripShortCode(code) {
+  renderLoading();
+  const data = await getShortlinkData(code);
+  if (!data || !["trip", "tripInvite"].includes(data.type) || !data.tripId) {
+    toast("這組行程代碼或連結已失效，請確認是否輸入正確");
+    navigate("");
+    return;
   }
+  if (data.type === "tripInvite" && !isInviteLinkValid(data)) {
+    const status = inviteLinkStatus(data);
+    toast(status === "revoked" ? "這組邀請連結已被統籌人撤銷，請索取新的邀請連結" : "這組邀請連結已過期，請索取新的邀請連結");
+    navigate("");
+    return;
+  }
+  state.openedViaInvite = data.type === "tripInvite";
+  state.inviteCode = data.type === "tripInvite" ? code : null;
+  navigate(`#/trip/${data.tripId}`);
 }
 
-async function commitWithAudit(tripId, action, detail, build) {
-  const batch = writeBatch(db);
-  build(batch);
-  batch.set(doc(collection(db, "adminAuditLogs")), {
-    adminUid: currentUser?.uid || null,
-    adminEmail: currentUser?.email || null,
-    tripId,
-    action,
-    detail: detail || {},
+// ------------------------------------------------------------
+// Firestore：行程（trip）
+// ------------------------------------------------------------
+async function loadTrip(tripId) {
+  clearAllUnsub();
+  state.tripId = tripId;
+  state.trip = null;
+  state.days = [];
+  state.spots = [];
+  state.currentDayId = null;
+  state.currentSpotId = null;
+  renderLoading();
+
+  const tripRef = doc(db, "trips", tripId);
+  const snap = await getDoc(tripRef);
+  if (!snap.exists()) {
+    toast("找不到這個行程，連結可能有誤");
+    navigate("");
+    return;
+  }
+  state.trip = { id: tripId, ...snap.data() };
+  saveMyTrip(tripId, state.trip.name);
+  applyTripBackground(state.trip.backgroundImageUrl, state.trip.backgroundDim);
+
+  state.unsub.trip = onSnapshot(tripRef, (s) => {
+    if (!s.exists()) return;
+    state.trip = { id: tripId, ...s.data() };
+    updateMyTripName(tripId, state.trip.name);
+    applyTripBackground(state.trip.backgroundImageUrl, state.trip.backgroundDim);
+    updateHeader();
+    // 若目前畫面跟成員/權限有關，重新渲染目前頁面
+    route();
+  });
+  // 天數等內容的訂閱改由 route() 依「是否已綁定成員身份」決定
+}
+
+async function createTrip(name, members) {
+  const uid = currentUid();
+  let ownerBound = false;
+  const boundMembers = (members || []).map((m) => {
+    const bindThisOwner = !!uid && m.permission === "owner" && !ownerBound;
+    if (bindThisOwner) ownerBound = true;
+    return { ...m, uid: bindThisOwner ? uid : (m.uid || null) };
+  });
+  const owner = boundMembers.find((m) => m.permission === "owner" && m.uid);
+  const access = {};
+  boundMembers.forEach((m) => {
+    const uids = Array.isArray(m.uids) ? m.uids : (m.uid ? [m.uid] : []);
+    uids.forEach((uid) => { if (uid && !access[uid]) access[uid] = m.permission; });
+  });
+  const ref = await addDoc(collection(db, "trips"), {
+    name,
+    members: boundMembers,
+    ownerUid: owner?.uid || null,
+    access,
+    authModelVersion: 2,
     createdAt: serverTimestamp(),
   });
+  saveMyTrip(ref.id, name);
+  return ref.id;
+}
+
+async function updateTripMembers(members) {
+  const normalizedMembers = members.map((m) => ({ ...m, uids: memberUids(m) }));
+  const ownerUid = state.trip?.ownerUid || currentUid();
+  const owners = normalizedMembers.filter((m) => m.permission === "owner");
+  const boundOwner = normalizedMembers.find((m) => memberUids(m).includes(ownerUid));
+
+  // 避免在成員管理畫面中意外移除真正的統籌人，或建立第二位 owner。
+  if (!ownerUid || owners.length !== 1 || !boundOwner || boundOwner.permission !== "owner") {
+    throw new Error("統籌人資料不完整，請保留原統籌人且不可新增第二位統籌人");
+  }
+
+  const access = {};
+  normalizedMembers.forEach((m) => {
+    memberUids(m).forEach((uid) => { if (uid) access[uid] = m.permission; });
+  });
+  await updateDoc(doc(db, "trips", state.tripId), {
+    members: normalizedMembers,
+    access,
+    ownerUid,
+    authModelVersion: 2,
+  });
+}
+
+async function createEditAccessRequest() {
+  const uid = currentUid();
+  if (!uid || !state.tripId || canEditItinerary()) return;
+
+  // 使用申請者 UID 作為文件 ID，避免訪客送出申請前必須查詢整個申請集合。
+  // 同一個 UID 在同一個行程中只會有一筆申請資料。
+  const requestRef = doc(db, "trips", state.tripId, "accessRequests", uid);
+  const existing = await getDoc(requestRef);
+  if (existing.exists()) {
+    const data = existing.data();
+    if (data.status === "pending") {
+      toast("你已經送出過編輯權限申請，請等待統籌人處理");
+      return;
+    }
+  }
+
+  if (existing.exists()) {
+    // 既有申請只更新必要欄位，避免 setDoc 覆寫並刪除歷史審核欄位；
+    // 原本記錄的 inviteCode 保留不動（Rules 也只允許改 status/createdAt）。
+    await updateDoc(requestRef, {
+      status: "pending",
+      createdAt: serverTimestamp(),
+    });
+  } else {
+    await setDoc(requestRef, {
+      requestedUid: uid,
+      status: "pending",
+      createdAt: serverTimestamp(),
+      inviteCode: state.openedViaInvite ? (state.inviteCode || null) : null,
+    });
+  }
+  toast("已送出編輯權限申請，請通知統籌人審核");
+}
+
+async function loadAccessRequests() {
+  const snap = await getDocs(collection(db, "trips", state.tripId, "accessRequests"));
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
+async function approveAccessRequest(requestId, requestedUid, memberId) {
+  if (!state.tripId || !requestedUid || !memberId) {
+    throw new Error("缺少核准申請所需資料");
+  }
+  const tripRef = doc(db, "trips", state.tripId);
+  const requestRef = doc(db, "trips", state.tripId, "accessRequests", requestId);
+  await runTransaction(db, async (tx) => {
+    const [tripSnap, requestSnap] = await Promise.all([tx.get(tripRef), tx.get(requestRef)]);
+    if (!tripSnap.exists() || !requestSnap.exists()) throw new Error("行程或申請資料不存在");
+    const trip = tripSnap.data();
+    const request = requestSnap.data();
+    if (request.status !== "pending" || request.requestedUid !== requestedUid) {
+      throw new Error("這筆申請已被處理，請重新整理後再試");
+    }
+    const latestMembers = (trip.members || []).map((m) => ({ ...m }));
+    const latestTarget = latestMembers.find((m) => m.id === memberId);
+    if (!latestTarget || latestTarget.permission === "owner") throw new Error("找不到可綁定的成員");
+    const uids = memberUids(latestTarget);
+    latestTarget.uids = [...new Set([...uids, requestedUid])];
+    latestTarget.uid = latestTarget.uids[0] || requestedUid;
+    latestTarget.permission = "editor";
+    const access = {};
+    latestMembers.forEach((m) => memberUids(m).forEach((u) => { if (u) access[u] = m.permission; }));
+    tx.update(tripRef, { members: latestMembers, access, authModelVersion: 2 });
+    tx.update(requestRef, { status: "approved", approvedMemberId: memberId, approvedAt: serverTimestamp() });
+  });
+}
+
+async function rejectAccessRequest(requestId) {
+  await updateDoc(doc(db, "trips", state.tripId, "accessRequests", requestId), {
+    status: "rejected",
+    rejectedAt: serverTimestamp(),
+  });
+}
+
+function isLegacyTrip() {
+  return !state.trip?.authModelVersion || !state.trip?.ownerUid || !state.trip?.access;
+}
+
+async function claimLegacyTrip() {
+  const uid = currentUid();
+  if (!uid || !state.trip || !isLegacyTrip()) return;
+  const ownerIndex = (state.trip.members || []).findIndex((m) => m.permission === "owner");
+  if (ownerIndex < 0) {
+    toast("這個舊行程沒有找到統籌人資料，請先在 Firebase Console 確認 members");
+    return;
+  }
+  const members = (state.trip.members || []).map((m, i) => ({
+    ...m,
+    uid: i === ownerIndex ? uid : (m.uid || null),
+  }));
+  const normalizedMembers = members.map((m) => ({ ...m, uids: memberUids(m) }));
+  const access = {};
+  normalizedMembers.forEach((m) => {
+    memberUids(m).forEach((mUid) => { if (mUid) access[mUid] = m.permission; });
+  });
+  await updateDoc(doc(db, "trips", state.tripId), {
+    members: normalizedMembers,
+    ownerUid: uid,
+    access,
+    authModelVersion: 2,
+    migratedAt: serverTimestamp(),
+  });
+  toast("已將此舊行程綁定到目前裝置的匿名身份");
+}
+
+async function updateTripCurrencies(currencies) {
+  await updateDoc(doc(db, "trips", state.tripId), { currencies });
+}
+
+// 把某個幣別最新查到（或手動輸入）的匯率存回行程資料，這樣同行每個人看到的都是同一組匯率
+async function saveTripFxRate(currency, rate, manual) {
+  await updateDoc(doc(db, "trips", state.tripId), {
+    [`fxRates.${currency}`]: { rate, updatedAt: todayStr(), manual: !!manual },
+  });
+}
+
+function tripFxRates() {
+  return (state.trip && state.trip.fxRates) || {};
+}
+
+// 嘗試自動查詢某幣別「最新」匯率（不指定日期，避免抓不到今天還沒公布的資料）並存回行程
+async function refreshFxRate(currency) {
+  if (currency === "TWD") return true;
+  const rate = await fetchExchangeRate("latest", currency);
+  if (rate) {
+    await saveTripFxRate(currency, rate, false);
+    return true;
+  }
+  return false;
+}
+
+async function updateTripBackground(url, dim) {
+  await updateDoc(doc(db, "trips", state.tripId), { backgroundImageUrl: url || "", backgroundDim: dim });
+}
+
+async function renameTrip(name) {
+  await updateDoc(doc(db, "trips", state.tripId), { name });
+}
+
+// ------------------------------------------------------------
+// Firestore：天數（days）
+// ------------------------------------------------------------
+function subscribeDays() {
+  clearUnsub("days");
+  const q = query(collection(db, "trips", state.tripId, "days"), orderBy("order", "asc"));
+  state.unsub.days = onSnapshot(q, (snap) => {
+    state.days = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    if ((!state.currentDayId || !state.days.find((d) => d.id === state.currentDayId)) && state.days.length) {
+      state.currentDayId = state.days[0].id;
+    }
+    if (state.currentDayId) ensureSpotsSubscription(state.currentDayId);
+    if (state.tripSection === "itinerary" && !state.currentSpotId) {
+      renderTripHome();
+    } else if (state.currentSpotId) {
+      // 天數列表變動也可能影響麵包屑，重繪 spot 頁
+      renderSpotPage();
+    }
+  });
+}
+
+let spotsSubscribedDay = null;
+function ensureSpotsSubscription(dayId) {
+  if (spotsSubscribedDay === dayId) return;
+  spotsSubscribedDay = dayId;
+  state.spots = [];
+  subscribeSpots(dayId);
+}
+
+function selectDay(dayId) {
+  state.currentDayId = dayId;
+  state.currentSpotId = null;
+  ensureSpotsSubscription(dayId);
+  navigate(`#/trip/${state.tripId}/day/${dayId}`);
+}
+
+async function createDay(title, date) {
+  const order = state.days.length;
+  const ref = await addDoc(collection(db, "trips", state.tripId, "days"), {
+    title, date: date || "", order, blocks: [], createdAt: serverTimestamp(),
+  });
+  state.currentDayId = ref.id;
+  return ref.id;
+}
+async function updateDayMeta(dayId, data) {
+  await updateDoc(doc(db, "trips", state.tripId, "days", dayId), data);
+}
+async function updateDayBlocks(dayId, blocks) {
+  await updateDoc(doc(db, "trips", state.tripId, "days", dayId), { blocks });
+}
+async function deleteDay(dayId) {
+  // 連同底下景點一起刪除
+  const spotsSnap = await getDocs(collection(db, "trips", state.tripId, "days", dayId, "spots"));
+  const batch = writeBatch(db);
+  spotsSnap.docs.forEach((d) => batch.delete(d.ref));
+  batch.delete(doc(db, "trips", state.tripId, "days", dayId));
+  await batch.commit();
+}
+async function moveDay(idx, delta) {
+  const arr = state.days;
+  const j = idx + delta;
+  if (j < 0 || j >= arr.length) return;
+  const a = arr[idx], b = arr[j];
+  const batch = writeBatch(db);
+  batch.update(doc(db, "trips", state.tripId, "days", a.id), { order: b.order });
+  batch.update(doc(db, "trips", state.tripId, "days", b.id), { order: a.order });
   await batch.commit();
 }
 
-function canonicalMemberSnapshot(members) {
-  // 只比較「成員編輯器實際管理」的欄位，避免 Firestore 中其他無關欄位、
-  // 欄位順序或舊資料格式差異造成假的 MEMBERS_CONFLICT。
-  return (Array.isArray(members) ? members : []).map((m) => ({
-    id: String(m?.id || ""),
-    name: String(m?.name || ""),
-    permission: String(m?.permission || ""),
-    uids: memberUidList(m),
-  })).sort((a, b) => a.id.localeCompare(b.id));
+// ------------------------------------------------------------
+// Firestore：景點 / 時段（spots）
+// ------------------------------------------------------------
+function subscribeSpots(dayId) {
+  clearUnsub("spots");
+  const q = query(collection(db, "trips", state.tripId, "days", dayId, "spots"), orderBy("order", "asc"));
+  state.unsub.spots = onSnapshot(q, (snap) => {
+    state.spots = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    if (state.tripSection === "itinerary" && !state.currentSpotId) {
+      renderTripHome();
+    }
+  });
 }
 
-function sameMemberSnapshot(a, b) {
-  return JSON.stringify(canonicalMemberSnapshot(a)) === JSON.stringify(canonicalMemberSnapshot(b));
+async function createSpot(dayId, title, time) {
+  const order = state.spots.length;
+  const ref = await addDoc(collection(db, "trips", state.tripId, "days", dayId, "spots"), {
+    title, time: time || "", order, blocks: [], mapUrl: null, createdAt: serverTimestamp(),
+  });
+  return ref.id;
+}
+async function updateSpotMeta(dayId, spotId, data) {
+  await updateDoc(doc(db, "trips", state.tripId, "days", dayId, "spots", spotId), data);
+}
+async function updateSpotBlocks(dayId, spotId, blocks) {
+  await updateDoc(doc(db, "trips", state.tripId, "days", dayId, "spots", spotId), { blocks });
+}
+async function deleteSpot(dayId, spotId) {
+  const wishesSnap = await getDocs(collection(db, "trips", state.tripId, "days", dayId, "spots", spotId, "wishes"));
+  const batch = writeBatch(db);
+  wishesSnap.docs.forEach((d) => batch.delete(d.ref));
+  batch.delete(doc(db, "trips", state.tripId, "days", dayId, "spots", spotId));
+  await batch.commit();
+}
+// 把一個景點複製到（同一個或另一個）天數；只複製名稱／時間／內容區塊／地圖設定，
+// 不會複製許願池留言（因為那是大家在原景點下的留言，複製過去容易造成混淆）。
+async function copySpotToDay(spot, targetDayId) {
+  const targetSpotsSnap = await getDocs(collection(db, "trips", state.tripId, "days", targetDayId, "spots"));
+  const order = targetSpotsSnap.size;
+  await addDoc(collection(db, "trips", state.tripId, "days", targetDayId, "spots"), {
+    title: spot.title,
+    time: spot.time || "",
+    blocks: spot.blocks || [],
+    mapUrl: spot.mapUrl || null,
+    order,
+    createdAt: serverTimestamp(),
+  });
+}
+// 把一個景點搬移到另一個天數：在目標天數建立一份一模一樣的景點（含許願池留言），
+// 再把原本天數底下的這個景點刪除，等於是「搬過去」而不是複製。
+async function moveSpotToDay(sourceDayId, spot, targetDayId) {
+  const targetSpotsSnap = await getDocs(collection(db, "trips", state.tripId, "days", targetDayId, "spots"));
+  const order = targetSpotsSnap.size;
+  const newSpotRef = doc(collection(db, "trips", state.tripId, "days", targetDayId, "spots"));
+  const wishesSnap = await getDocs(collection(db, "trips", state.tripId, "days", sourceDayId, "spots", spot.id, "wishes"));
+  const batch = writeBatch(db);
+  batch.set(newSpotRef, {
+    title: spot.title,
+    time: spot.time || "",
+    blocks: spot.blocks || [],
+    mapUrl: spot.mapUrl || null,
+    order,
+    createdAt: serverTimestamp(),
+  });
+  wishesSnap.docs.forEach((d) => {
+    const newWishRef = doc(collection(db, "trips", state.tripId, "days", targetDayId, "spots", newSpotRef.id, "wishes"));
+    batch.set(newWishRef, d.data());
+    batch.delete(d.ref);
+  });
+  batch.delete(doc(db, "trips", state.tripId, "days", sourceDayId, "spots", spot.id));
+  await batch.commit();
+}
+async function moveSpot(dayId, idx, delta) {
+  const arr = state.spots;
+  const j = idx + delta;
+  if (j < 0 || j >= arr.length) return;
+  const a = arr[idx], b = arr[j];
+  const batch = writeBatch(db);
+  batch.update(doc(db, "trips", state.tripId, "days", dayId, "spots", a.id), { order: b.order });
+  batch.update(doc(db, "trips", state.tripId, "days", dayId, "spots", b.id), { order: a.order });
+  await batch.commit();
 }
 
+function subscribeSpot(dayId, spotId) {
+  clearUnsub("spot");
+  clearUnsub("wishes");
+  const spotRef = doc(db, "trips", state.tripId, "days", dayId, "spots", spotId);
+  state.unsub.spot = onSnapshot(spotRef, (s) => {
+    if (!s.exists()) {
+      toast("這個景點已被刪除");
+      navigate(`#/trip/${state.tripId}/day/${dayId}`);
+      return;
+    }
+    state.currentSpot = { id: s.id, ...s.data() };
+    renderSpotPage();
+  });
+  const wq = query(collection(db, "trips", state.tripId, "days", dayId, "spots", spotId, "wishes"), orderBy("createdAt", "desc"));
+  state.unsub.wishes = onSnapshot(wq, (snap) => {
+    state.wishes = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    renderSpotPage();
+  });
+}
 
-const btn = (act, label, data = {}, danger = false) =>
-  `<button class="admin-link-btn${danger ? " admin-danger" : ""}" data-act="${act}" ${Object.entries(data).map(([k, v]) => `data-${k}="${escapeHtml(v)}"`).join(" ")}>${label}</button>`;
-
-function renderMembersSection(trip) {
-  const members = trip.members || [];
-  return `
-    <h2 class="admin-section-title">👥 成員與權限</h2>
-    ${members.length === 0 ? `<p class="admin-muted">沒有成員資料。</p>` : `
-      <div class="admin-table-scroll"><table class="admin-table">
-        <thead><tr><th>名稱</th><th>權限</th><th>綁定 UID</th></tr></thead>
-        <tbody>
-          ${members.map((m) => {
-            const uids = Array.isArray(m.uids) ? m.uids : (m.uid ? [m.uid] : []);
-            return `<tr><td data-label="名稱">${escapeHtml(m.name || "（未命名）")}</td><td data-label="權限">${escapeHtml(permissionLabel(m.permission))}</td><td data-label="綁定 UID"><code style="font-size:11px;">${uids.map(escapeHtml).join("<br>") || "—"}</code></td></tr>`;
-          }).join("")}
-        </tbody>
-      </table></div>
-    `}
-  `;
+async function addWish(dayId, spotId, text, imageUrl, mapUrl, mapAddress) {
+  const m = myMember();
+  await addDoc(collection(db, "trips", state.tripId, "days", dayId, "spots", spotId, "wishes"), {
+    text: text || "",
+    imageUrl: imageUrl || null,
+    mapUrl: mapUrl || null,
+    mapAddress: mapAddress || null,
+    authorId: m ? m.id : null,
+    authorUid: currentUid(), // 供 Firestore Rules 驗證「只能修改／刪除自己的留言」
+    authorName: m ? m.name : "匿名旅伴",
+    createdAt: serverTimestamp(),
+  });
+}
+async function updateWish(dayId, spotId, wishId, data) {
+  await updateDoc(doc(db, "trips", state.tripId, "days", dayId, "spots", spotId, "wishes", wishId), data);
+}
+async function deleteWish(dayId, spotId, wishId) {
+  await deleteDoc(doc(db, "trips", state.tripId, "days", dayId, "spots", spotId, "wishes", wishId));
 }
 
 // ------------------------------------------------------------
-// 邀請連結管理（管理員後台）
+// Firestore：記帳（expenses）
 // ------------------------------------------------------------
-function inviteStatus(link) {
+function subscribeExpenses() {
+  clearUnsub("expenses");
+  const q = query(collection(db, "trips", state.tripId, "expenses"), orderBy("date", "asc"));
+  state.unsub.expenses = onSnapshot(q, (snap) => {
+    state.expenses = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    if (state.tripSection === "expenses") renderExpensesPage();
+  });
+}
+
+function canManageExpense(expense) {
+  if (canEditItinerary()) return true;
+  return !!expense && expense.createdByUid === currentUid();
+}
+
+async function addExpense({ title, amountCents, currency, payerId, splitWith, date, note }) {
+  const uid = currentUid();
+  if (!uid || !canViewContent()) throw new Error("未登入或尚未綁定行程成員");
+  await addDoc(collection(db, "trips", state.tripId, "expenses"), {
+    title, amountCents, currency, payerId, splitWith, date, note: note || "",
+    createdByUid: uid,
+    createdAt: serverTimestamp(),
+  });
+}
+async function updateExpense(expenseId, { title, amountCents, currency, payerId, splitWith, date, note }) {
+  await updateDoc(doc(db, "trips", state.tripId, "expenses", expenseId), {
+    title, amountCents, currency, payerId, splitWith, date, note: note || "",
+  });
+}
+async function deleteExpense(expenseId) {
+  await deleteDoc(doc(db, "trips", state.tripId, "expenses", expenseId));
+}
+
+
+// ------------------------------------------------------------
+// Header / 選單
+// ------------------------------------------------------------
+function updateHeader() {
+  const nameEl = document.getElementById("header-trip-name");
+  const badge = document.getElementById("current-member-badge");
+  const shareBtn = document.getElementById("share-btn");
+  const renameBtn = document.getElementById("rename-trip-btn");
+  if (state.trip) {
+    nameEl.textContent = state.trip.name;
+    const m = myMember();
+    badge.textContent = m
+      ? `你是：${m.name}${m.permission === "viewer" ? "（唯讀）" : ""}`
+      : "尚未綁定身份";
+    badge.classList.remove("hidden");
+    shareBtn.classList.remove("hidden");
+    renameBtn.classList.toggle("hidden", !isOwner());
+  } else {
+    nameEl.textContent = "旅行行程規劃工具";
+    badge.classList.add("hidden");
+    shareBtn.classList.add("hidden");
+    renameBtn.classList.add("hidden");
+  }
+}
+
+document.getElementById("rename-trip-btn").addEventListener("click", () => {
+  if (!state.trip) return;
+  openModal("重新命名行程", `
+    <div class="form-row"><label>行程名稱</label><input type="text" id="rename-trip-input" value="${escapeHtml(state.trip.name)}"></div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="rename-cancel">取消</button>
+      <button class="primary-btn" id="rename-confirm">儲存</button>
+    </div>
+  `);
+  const input = document.getElementById("rename-trip-input");
+  input.focus();
+  input.select();
+  document.getElementById("rename-cancel").onclick = closeModal;
+  document.getElementById("rename-confirm").onclick = async () => {
+    const name = input.value.trim();
+    if (!name) return toast("請輸入行程名稱");
+    await renameTrip(name);
+    closeModal();
+  };
+});
+
+document.getElementById("share-btn").addEventListener("click", () => {
+  renderShareTripModal();
+});
+
+// ------------------------------------------------------------
+// 邀請連結（可設定到期時間、次數上限，撤銷後可永久刪除，多組並存）
+// 對照表存兩份：shortlinks/{code} 是給任何人用代碼查詢用的公開解析表（不可列出所有代碼）；
+// trips/{tripId}/inviteLinks/{code} 是給統籌人在「管理成員與權限」列出/管理自己行程邀請連結用的鏡像資料。
+// 兩份用同一組 code 當文件 ID，撤銷／改期限時會同時更新。
+// ------------------------------------------------------------
+async function createTripInviteLink({ label, expiresAt, maxUses } = {}) {
+  const tripId = state.tripId;
+  const uid = currentUid();
+  for (let i = 0; i < 6; i++) {
+    const code = genShortCode();
+    const payload = {
+      type: "tripInvite",
+      tripId,
+      label: (label || "").trim() || null,
+      createdAt: serverTimestamp(),
+      createdBy: uid,
+      expiresAt: expiresAt ? Timestamp.fromDate(expiresAt) : null,
+      revoked: false,
+      // 次數上限預設無限（null），由統籌人手動調整；核准編輯權限申請時前端會核對已核准人數，
+      // 不是靠訪客端自行遞增計數，所以不需要後端也能可靠地擋住超過次數的核准。
+      maxUses: maxUses || null,
+      usedCount: 0,
+    };
+    try {
+      const batch = writeBatch(db);
+      batch.set(doc(db, "shortlinks", code), payload);
+      batch.set(doc(db, "trips", tripId, "inviteLinks", code), payload);
+      await batch.commit();
+      return { code, error: null };
+    } catch (err) {
+      console.error("[inviteLinks] 建立邀請連結失敗", err);
+      if (err && err.code === "permission-denied") {
+        return { code: null, error: "permission-denied" };
+      }
+      // 其他錯誤（極少見的代碼剛好撞號）重新抽一組再試
+    }
+  }
+  return { code: null, error: "unknown" };
+}
+
+async function loadInviteLinks() {
+  if (!state.tripId) return [];
+  try {
+    const q = query(collection(db, "trips", state.tripId, "inviteLinks"), orderBy("createdAt", "desc"));
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  } catch (err) {
+    console.error("[inviteLinks] 讀取邀請連結清單失敗", err);
+    return null; // 讀取失敗（例如規則尚未更新）與「沒有任何連結」區分開來
+  }
+}
+
+async function deleteInviteLink(code) {
+  const batch = writeBatch(db);
+  batch.delete(doc(db, "shortlinks", code));
+  batch.delete(doc(db, "trips", state.tripId, "inviteLinks", code));
+  await batch.commit();
+}
+
+async function setInviteLinkExpiry(code, expiresAtDateOrNull) {
+  const value = expiresAtDateOrNull ? Timestamp.fromDate(expiresAtDateOrNull) : null;
+  const batch = writeBatch(db);
+  batch.update(doc(db, "shortlinks", code), { expiresAt: value });
+  batch.update(doc(db, "trips", state.tripId, "inviteLinks", code), { expiresAt: value });
+  await batch.commit();
+}
+
+// 次數上限：留空／null 代表無限次，統籌人可隨時調整，跟到期時間走同一套「手動調整」邏輯。
+async function setInviteLinkMaxUses(code, maxUsesOrNull) {
+  const batch = writeBatch(db);
+  batch.update(doc(db, "shortlinks", code), { maxUses: maxUsesOrNull });
+  batch.update(doc(db, "trips", state.tripId, "inviteLinks", code), { maxUses: maxUsesOrNull });
+  await batch.commit();
+}
+
+// 核准編輯權限申請時用：算出某組邀請連結目前已核准（含這筆申請本身以外）的次數。
+// 因為訪客端沒有寫入 access 的權限，「核准」永遠要統籌人手動按下，所以在核准當下用最新資料核對次數上限，
+// 已經足夠可靠，不需要額外的後端服務。
+function approvedCountForCode(allRequests, code, excludeRequestId) {
+  if (!code) return 0;
+  return allRequests.filter((r) => r.inviteCode === code && r.status === "approved" && r.id !== excludeRequestId).length;
+}
+
+function inviteLinkStatus(link) {
   if (link.revoked) return "revoked";
   if (link.expiresAt) {
-    const ms = typeof link.expiresAt.toMillis === "function" ? link.expiresAt.toMillis() : new Date(link.expiresAt).getTime();
+    const ms = link.expiresAt.toMillis ? link.expiresAt.toMillis() : new Date(link.expiresAt).getTime();
     if (ms <= Date.now()) return "expired";
   }
   return "active";
 }
-function inviteStatusLabel(status) {
-  return status === "revoked" ? "已撤銷" : status === "expired" ? "已過期" : "使用中";
+function isInviteLinkValid(data) {
+  return inviteLinkStatus(data) === "active";
 }
-function inviteCodeIsLegacy(code) { return String(code || "").length === 6; }
-function adminInviteUrl(code) { return `${window.location.origin}${window.location.pathname.replace(/admin\.html$/i, "index.html")}#/s/${code}`; }
-function parseAdminDatetimeLocal(value) { if (!value) return null; const d = new Date(value); return isNaN(d.getTime()) ? null : d; }
-function adminDatetimeValue(ts) {
-  if (!ts) return "";
-  const d = typeof ts.toDate === "function" ? ts.toDate() : new Date(ts);
-  const pad = n => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+function inviteLinkStatusLabel(status) {
+  if (status === "revoked") return "已撤銷";
+  if (status === "expired") return "已過期";
+  return "使用中";
 }
-async function loadAdminInviteLinks(tripId) {
-  const snap = await getDocs(query(collection(db, "trips", tripId, "inviteLinks"), orderBy("createdAt", "desc")));
-  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+// datetime-local <input> 的值（本地時間，無時區）轉成 Date 物件
+function parseDatetimeLocal(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? null : d;
 }
-async function loadAdminInviteRequests(tripId) {
-  try {
-    const snap = await getDocs(collection(db, "trips", tripId, "accessRequests"));
-    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
-  } catch (e) {
-    console.warn("[admin invite] 無法讀取 accessRequests", e);
-    return [];
-  }
-}
-async function updateAdminInviteLink(tripId, code, patch, action, detail) {
-  if (!adminCanEdit) throw new Error("沒有邀請連結編輯權限");
-  const batch = writeBatch(db);
-  batch.update(doc(db, "shortlinks", code), patch);
-  batch.update(doc(db, "trips", tripId, "inviteLinks", code), patch);
-  batch.set(doc(collection(db, "adminAuditLogs")), {
-    adminUid: currentUser?.uid || null, adminEmail: currentUser?.email || null,
-    tripId, action, detail: { code, ...detail }, createdAt: serverTimestamp()
-  });
-  await batch.commit();
-}
-async function deleteAdminInviteLink(tripId, code) {
-  if (!adminCanEdit) throw new Error("沒有邀請連結刪除權限");
-  const batch = writeBatch(db);
-  batch.delete(doc(db, "shortlinks", code));
-  batch.delete(doc(db, "trips", tripId, "inviteLinks", code));
-  batch.set(doc(collection(db, "adminAuditLogs")), {
-    adminUid: currentUser?.uid || null, adminEmail: currentUser?.email || null,
-    tripId, action: "invite-delete", detail: { code, legacy: inviteCodeIsLegacy(code) }, createdAt: serverTimestamp()
-  });
-  await batch.commit();
-}
-async function deleteKnownShortlink(code) {
-  if (!adminCanEdit) throw new Error("沒有舊版連結刪除權限");
-  const normalized = String(code || "").trim().toUpperCase();
-  if (!/^[A-Z0-9]{6}$/.test(normalized)) throw new Error("舊版連結代碼必須是 6 碼英數字");
-  const ref = doc(db, "shortlinks", normalized);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) throw new Error("找不到這組 6 碼連結，可能已刪除或從未存在");
-  const data = snap.data() || {};
-  if (!["tripInvite", "sync"].includes(data.type)) throw new Error("這組代碼不是可清理的邀請／同步連結");
-  const batch = writeBatch(db);
-  batch.delete(ref);
-  if (data.type === "tripInvite" && data.tripId) batch.delete(doc(db, "trips", data.tripId, "inviteLinks", normalized));
-  if (data.type === "sync") {
-    batch.set(doc(collection(db, "adminAuditLogs")), { adminUid: currentUser?.uid || null, adminEmail: currentUser?.email || null, tripId: "(shortlinks)", action: "legacy-sync-delete", detail: { code: normalized }, createdAt: serverTimestamp() });
-  } else {
-    batch.set(doc(collection(db, "adminAuditLogs")), { adminUid: currentUser?.uid || null, adminEmail: currentUser?.email || null, tripId: data.tripId || "", action: "legacy-invite-delete", detail: { code: normalized }, createdAt: serverTimestamp() });
-  }
-  await batch.commit();
+// Firestore Timestamp -> 填回 <input type=datetime-local> 需要的字串（本地時間）
+function toDatetimeLocalValue(timestamp) {
+  if (!timestamp) return "";
+  const d = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-async function createAdminInviteLink(tripId, { label, expiresAt, maxUses } = {}) {
-  if (!adminCanEdit) throw new Error("沒有邀請連結建立權限");
-  if (!(await ensureRecentLogin("建立邀請連結"))) throw new Error("CANCELLED");
-  const cleanLabel = String(label || "").trim().slice(0, 200);
-  const value = expiresAt ? Timestamp.fromDate(expiresAt) : null;
-  for (let i = 0; i < 6; i++) {
-    const code = genAdminShortCode(12);
-    const payload = {
-      type: "tripInvite", tripId, createdBy: currentUser?.uid || "", createdAt: serverTimestamp(),
-      label: cleanLabel, expiresAt: value, revoked: false, maxUses: maxUses || null, usedCount: 0
-    };
-    const batch = writeBatch(db);
-    batch.set(doc(db, "shortlinks", code), payload);
-    batch.set(doc(db, "trips", tripId, "inviteLinks", code), payload);
-    batch.set(doc(collection(db, "adminAuditLogs")), {
-      adminUid: currentUser?.uid || null, adminEmail: currentUser?.email || null, tripId,
-      action: "invite-create", detail: { code, label: cleanLabel, expiresAt: expiresAt ? expiresAt.toISOString() : null, maxUses: maxUses || null },
-      createdAt: serverTimestamp()
-    });
-    try { await batch.commit(); return code; }
-    catch (err) { if (err?.code === "permission-denied") throw err; }
-  }
-  throw new Error("無法產生唯一的 12 碼邀請代碼");
+function inviteUrlOf(code) {
+  return `${window.location.origin}${window.location.pathname}#/s/${code}`;
 }
 
-function genAdminShortCode(len = 12) {
-  const chars = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
-  const values = new Uint32Array(len); crypto.getRandomValues(values);
-  return Array.from(values, (v) => chars[v % chars.length]).join("");
-}
-
-function renderAdminInviteLinksSection(trip, links, requests) {
-  const counts = {};
-  requests.filter(r => r.status === "approved" && r.inviteCode).forEach(r => { counts[r.inviteCode] = (counts[r.inviteCode] || 0) + 1; });
-  if (!links.length) return `<h2 class="admin-section-title">🔗 邀請連結</h2>
-    ${adminCanEdit ? `<div class="admin-row-actions" style="margin:8px 0 12px;">
-      <input id="admin-new-invite-label" placeholder="連結用途（選填）" style="flex:1;min-width:150px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font:inherit;">
-      <input id="admin-new-invite-expiry" type="datetime-local" style="padding:8px;border:1px solid var(--border);border-radius:8px;">
-      <input id="admin-new-invite-maxuses" type="number" min="1" max="10000" placeholder="次數上限（留空=無限）" style="width:170px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;">
-      <button class="admin-primary-btn" data-act="invite-create">＋ 建立邀請連結</button>
-    </div>` : ""}
-    <p class="admin-muted">目前沒有邀請連結。</p>`;
-  return `<h2 class="admin-section-title">🔗 邀請連結</h2>
-    <p class="admin-muted">邀請代碼一律由系統隨機產生 12 碼，介面不提供手動編輯代碼。具編輯權限者可建立、調整到期時間／次數上限或永久刪除；所有建立與修改操作均寫入稽核紀錄。6 碼連結會標示為舊版，建議逐一清除。</p>
-    ${adminCanEdit ? `<div class="admin-row-actions" style="margin:8px 0 12px;">
-      <input id="admin-new-invite-label" placeholder="連結用途（選填）" style="flex:1;min-width:150px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font:inherit;">
-      <input id="admin-new-invite-expiry" type="datetime-local" style="padding:8px;border:1px solid var(--border);border-radius:8px;">
-      <input id="admin-new-invite-maxuses" type="number" min="1" max="10000" placeholder="次數上限（留空=無限）" style="width:170px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;">
-      <button class="admin-primary-btn" data-act="invite-create">＋ 建立邀請連結</button>
-    </div>` : ""}
-    <div class="admin-table-scroll"><table class="admin-table">
-      <thead><tr><th>連結用途</th><th>版本／狀態</th><th>到期時間</th><th>使用次數</th><th>建立時間</th><th>12 碼代碼／連結</th><th>操作</th></tr></thead><tbody>
-      ${links.map(l => {
-        const status=inviteStatus(l), used=counts[l.id] || 0, remain=l.maxUses ? Math.max(0, l.maxUses-used) : null;
-        const legacy=inviteCodeIsLegacy(l.id);
-        return `<tr>
-          <td data-label="連結用途">${escapeHtml(l.label || "（未命名）")}<div class="admin-muted" style="font-size:11px;"><code>${escapeHtml(l.id)}</code></div></td>
-          <td data-label="版本／狀態">${legacy ? '<span class="admin-badge admin-badge-disabled">舊版 6 碼</span> ' : '<span class="admin-badge admin-badge-active">新版 12 碼</span> '}<span class="admin-badge ${status === "active" ? "admin-badge-active" : "admin-badge-disabled"}">${inviteStatusLabel(status)}</span></td>
-          <td data-label="到期時間">${l.expiresAt ? fmtDate(l.expiresAt) : "永久"}</td>
-          <td data-label="使用次數">${used}${l.maxUses ? ` / ${l.maxUses}（剩 ${remain}）` : "（無限制）"}</td>
-          <td data-label="建立時間">${fmtDate(l.createdAt)}</td>
-          <td data-label="12 碼代碼"><code style="font-size:13px;letter-spacing:1.5px;">${escapeHtml(l.id)}</code><div class="admin-muted" style="font-size:11px;word-break:break-all;margin-top:4px;">${escapeHtml(adminInviteUrl(l.id))}</div></td>
-          <td data-label="操作" class="admin-row-actions">${adminCanEdit ? btn("invite-edit", "編輯", { code:l.id }) : ""}${adminCanEdit ? btn("invite-delete", legacy ? "刪除舊版" : "撤銷並刪除", { code:l.id }, true) : ""}</td>
-        </tr>`;
-      }).join("")}</tbody></table></div>`;
-}
-
-// ------------------------------------------------------------
-// 行程內容載入（許願池留言預設不載入，點開才讀，匯出時才全部讀）
-// ------------------------------------------------------------
-async function loadWishes(tripId, dayId, spotId) {
-  const snap = await getDocs(query(collection(db, "trips", tripId, "days", dayId, "spots", spotId, "wishes"), orderBy("createdAt", "desc")));
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-}
-
-async function loadTripTree(tripId, withWishes) {
-  const daysSnap = await getDocs(query(collection(db, "trips", tripId, "days"), orderBy("order", "asc")));
-  const days = await Promise.all(daysSnap.docs.map(async (d) => {
-    const spotsSnap = await getDocs(query(collection(db, "trips", tripId, "days", d.id, "spots"), orderBy("order", "asc")));
-    const spots = await Promise.all(spotsSnap.docs.map(async (s) => {
-      const spot = { id: s.id, ...s.data() };
-      if (withWishes) spot.wishes = await loadWishes(tripId, d.id, s.id);
-      return spot;
-    }));
-    return { id: d.id, ...d.data(), spots };
-  }));
-  const expSnap = await getDocs(query(collection(db, "trips", tripId, "expenses"), orderBy("date", "asc")));
-  return { days, expenses: expSnap.docs.map((d) => ({ id: d.id, ...d.data() })) };
-}
-
-function renderBlocksAdmin(blocks, dayId, spotId) {
-  return (blocks || []).map((b, i) => `
-    <div>${renderBlockView(b)}${adminCanEdit ? `<div class="admin-row-actions">${b.type === "text" ? btn("block-edit", "編輯文字", { day: dayId, spot: spotId || "", idx: i }) : ""}${btn("block-del", "移除區塊", { day: dayId, spot: spotId || "", idx: i }, true)}</div>` : ""}</div>
-  `).join("");
-}
-
-function wishesHtml(wishes, dayId, spotId) {
-  if (!wishes.length) return `<p class="admin-muted">沒有許願池留言。</p>`;
-  return wishes.map((w) => `
-    <div class="admin-wish">
-      <div class="admin-wish-meta">${escapeHtml(w.authorName || "匿名旅伴")}　${fmtDate(w.createdAt)}</div>
-      ${w.text ? `<div>${escapeHtml(w.text)}</div>` : ""}
-      ${w.imageUrl ? `<img src="${escapeHtml(w.imageUrl)}" loading="lazy" style="max-width:160px;border-radius:6px;margin-top:4px;">` : ""}
-      ${adminCanEdit ? btn("wish-del", "刪除留言", { day: dayId, spot: spotId, wish: w.id }, true) : ""}
-    </div>
-  `).join("");
-}
-
-async function showTripDetail(tripId) {
-  const trip = tripsCache.find((t) => t.id === tripId);
-  if (!trip) return;
-  const back = `<button id="admin-back-btn" class="admin-secondary-btn" style="margin-bottom:12px;">← 回到行程清單</button>`;
-  render(`<div class="admin-card">${back}<h1>${escapeHtml(trip.name || "（未命名）")}</h1><p class="admin-muted">載入內容中...</p></div>`);
-  document.getElementById("admin-back-btn").onclick = () => showTripList(currentUser);
-
-  try {
-    const tree = await loadTripTree(tripId, false);
-    const inviteLinks = await loadAdminInviteLinks(tripId);
-    const inviteRequests = await loadAdminInviteRequests(tripId);
-    detailCtx = { tripId, trip, tree, inviteLinks, inviteRequests };
-    const memberNameById = {};
-    (trip.members || []).forEach((m) => { memberNameById[m.id] = m.name; });
-    const disabled = trip.disabled === true;
-
-    render(`
-      <div class="admin-card">
-        ${back}
-        <div class="admin-topbar">
-          <div>
-            <h1>${escapeHtml(trip.name || "（未命名）")}</h1>
-            <p class="admin-muted">行程 ID：<code>${escapeHtml(trip.id)}</code>　建立時間：${fmtDate(trip.createdAt)}</p>
-            ${disabled && trip.disabledReason ? `<p class="admin-muted">停用原因：${escapeHtml(trip.disabledReason)}</p>` : ""}
-            ${trip.deleted === true ? `<p class="admin-muted" style="color:#B3402A;">🗑️ 此行程已被刪除（一般使用者看不到，資料仍保留）${trip.deletedReason ? `　原因：${escapeHtml(trip.deletedReason)}` : ""}</p>` : ""}
-          </div>
-          <div style="text-align:right;">
-            <span class="admin-badge ${disabled ? "admin-badge-disabled" : "admin-badge-active"}">${disabled ? "已停用" : "啟用中"}</span><br/>
-            <button id="admin-toggle-btn" class="admin-secondary-btn" style="margin-top:8px;">${disabled ? "恢復啟用" : "停用此行程"}</button>
-          </div>
-        </div>
-        <div class="admin-row-actions" style="margin:8px 0;">${btn("export", "⬇ 匯出 JSON")}${adminCanEdit ? btn("import", "⬆ 匯入為新行程") : ""}${adminCanEdit ? btn("rename", "✏️ 修改行程名稱") : ""}${adminCanManageMembers ? btn("mem-edit", "🔑 編輯成員權限／UID") : ""}${adminCanEdit ? btn(trip.deleted === true ? "restore-trip" : "delete-trip", trip.deleted === true ? "♻️ 還原此行程" : "🗑️ 刪除此行程", {}, trip.deleted !== true) : ""}</div>
-        <p class="admin-muted">${adminCanEdit ? "你的帳號具有編輯權限，所有修改都會寫入稽核紀錄。" : "目前是唯讀檢視（此帳號的 admins 文件尚未設定 canEdit: true）。"}</p>
-
-        ${renderMembersSection(trip)}
-        ${renderAdminInviteLinksSection(trip, detailCtx.inviteLinks || [], detailCtx.inviteRequests || [])}
-
-        <h2 class="admin-section-title">📅 天數與景點</h2>
-        ${tree.days.length === 0 ? `<p class="admin-muted">目前沒有任何天數。</p>` : tree.days.map((day) => `
-          <div class="admin-day-block">
-            <h3>${escapeHtml(day.title || "（未命名天數）")}${day.date ? `　${escapeHtml(day.date)}` : ""}</h3>
-            ${(day.blocks || []).length ? `<div class="admin-blocks">${renderBlocksAdmin(day.blocks, day.id, "")}</div>` : ""}
-            ${day.spots.length === 0 ? `<p class="admin-muted" style="margin-left:12px;">（沒有景點）</p>` : day.spots.map((spot) => `
-              <div class="admin-spot-block">
-                <h4>${escapeHtml(spot.title || "（未命名景點）")}${spot.time ? `　${escapeHtml(spot.time)}` : ""}</h4>
-                ${adminCanEdit ? `<div class="admin-row-actions">${btn("spot-edit", "編輯名稱／時間", { day: day.id, spot: spot.id })}${btn("spot-del", "刪除景點", { day: day.id, spot: spot.id }, true)}</div>` : ""}
-                ${(spot.blocks || []).length ? `<div class="admin-blocks">${renderBlocksAdmin(spot.blocks, day.id, spot.id)}</div>` : ""}
-                <div class="admin-wishes">${btn("wishes", "載入許願池留言", { day: day.id, spot: spot.id })}<div id="wishes-${escapeHtml(spot.id)}"></div></div>
-              </div>
-            `).join("")}
-          </div>
-        `).join("")}
-
-        <h2 class="admin-section-title">💰 記帳明細</h2>
-        ${tree.expenses.length === 0 ? `<p class="admin-muted">目前沒有任何記帳明細。</p>` : `
-          <div class="admin-table-scroll"><table class="admin-table">
-            <thead><tr><th>日期</th><th>項目</th><th>金額</th><th>付款人</th><th>分攤對象</th><th>備註</th>${adminCanEdit ? "<th></th>" : ""}</tr></thead>
-            <tbody>
-              ${tree.expenses.map((e) => `
-                <tr>
-                  <td data-label="日期">${escapeHtml(e.date || "")}</td>
-                  <td data-label="項目">${escapeHtml(e.title || "")}</td>
-                  <td data-label="金額">${fmtMoney(e.amountCents)} ${escapeHtml(e.currency || "")}</td>
-                  <td data-label="付款人">${escapeHtml(memberNameById[e.payerId] || e.payerId || "")}</td>
-                  <td data-label="分攤對象">${(e.splitWith || []).map((id) => escapeHtml(memberNameById[id] || id)).join("、")}</td>
-                  <td data-label="備註">${escapeHtml(e.note || "")}</td>
-                  ${adminCanEdit ? `<td data-label="操作">${btn("exp-del", "刪除", { exp: e.id }, true)}</td>` : ""}
-                </tr>
-              `).join("")}
-            </tbody>
-          </table></div>
-        `}
-      </div>
+// 分享行程：只保留「邀請連結」這一種分享方式
+async function renderShareTripModal() {
+  if (!isOwner()) {
+    openModal("分享此行程", `
+      <p style="font-size:13px;color:var(--text-muted);margin-top:0;">邀請連結由統籌人建立與管理。若想邀請其他人加入，請聯絡統籌人取得邀請連結。</p>
+      <div class="form-actions"><button class="primary-btn" id="share-close-btn">關閉</button></div>
     `);
-    document.getElementById("admin-back-btn").onclick = () => showTripList(currentUser);
-    document.getElementById("admin-toggle-btn").onclick = async () => {
-      const ok = await toggleTripDisabled(tripId);
-      if (ok) showTripDetail(tripId);
-    };
-  } catch (err) {
-    console.error(err);
-    render(`<div class="admin-card">${back}<p class="admin-muted">載入行程內容失敗：${escapeHtml(err.message || String(err))}</p></div>`);
-    document.getElementById("admin-back-btn").onclick = () => showTripList(currentUser);
-  }
-}
-
-// ------------------------------------------------------------
-// 匯出 JSON（也會留下稽核紀錄）
-// ------------------------------------------------------------
-// 匯出全部（未刪除）行程的完整內容，當成免費、手動的備份方式。
-// Firestore 的「排程自動匯出」需要升級到付費方案（Blaze），這裡改用純讀取達到同樣效果，
-// 差別只是要手動點擊執行，建議自己抓固定頻率（例如每週）手動做一次。
-async function exportAllTrips() {
-  const btn2 = document.getElementById("admin-backup-btn");
-  const targets = tripsCache.filter((t) => t.deleted !== true);
-  if (!targets.length) return window.alert("目前沒有可備份的行程");
-  if (!window.confirm(`即將讀取並匯出 ${targets.length} 個行程的完整內容，行程數量多時會花一點時間，確定嗎？`)) return;
-  if (btn2) { btn2.disabled = true; btn2.textContent = "備份中...0/" + targets.length; }
-  const result = [];
-  for (let i = 0; i < targets.length; i++) {
-    const t = targets[i];
-    try {
-      const tree = await loadTripTree(t.id, true);
-      result.push({ trip: t, days: tree.days, expenses: tree.expenses });
-    } catch (err) {
-      console.error("備份失敗：", t.id, err);
-      result.push({ trip: t, error: String(err?.message || err) });
-    }
-    if (btn2) btn2.textContent = `備份中...${i + 1}/${targets.length}`;
-  }
-  const json = JSON.stringify({ exportedAt: new Date().toISOString(), tripCount: result.length, trips: result }, function (k, v) {
-    const raw = this[k];
-    return raw && typeof raw.toDate === "function" ? raw.toDate().toISOString() : v;
-  }, 2);
-  await commitWithAudit("(all)", "backup-all", { tripCount: result.length }, () => {});
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([json], { type: "application/json" }));
-  a.download = `trips-backup-${new Date().toISOString().slice(0, 10)}.json`;
-  a.click();
-  URL.revokeObjectURL(a.href);
-  if (btn2) { btn2.disabled = false; btn2.textContent = "💾 匯出全部行程備份"; }
-}
-
-async function importTripAsNew() {
-  if (!adminCanEdit || !currentUser?.uid) return;
-  const input = document.createElement("input");
-  input.type = "file"; input.accept = "application/json,.json";
-  input.onchange = async () => {
-    const file = input.files?.[0]; if (!file) return;
-    try {
-      const payload = JSON.parse(await file.text());
-      const source = payload.trip || payload;
-      if (!source || typeof source.name !== "string" || !Array.isArray(payload.days)) throw new Error("JSON 格式不正確");
-      const newTripRef = doc(collection(db, "trips"));
-      const ownerUid = currentUser.uid;
-      const members = [{ id: "member_" + ownerUid.slice(0, 12), name: "匯入者", permission: "owner", uid: ownerUid, uids: [ownerUid] }];
-      const access = { [ownerUid]: "owner" };
-      const cleanTrip = { name: source.name.slice(0, 200), members, ownerUid, access, authModelVersion: 2, createdAt: serverTimestamp(), importedAt: serverTimestamp(), importedFrom: detailCtx?.tripId || null };
-      const batch = writeBatch(db); batch.set(newTripRef, cleanTrip);
-      let count = 1;
-      for (const day of payload.days) {
-        const dayRef = day.id ? doc(newTripRef, "days", day.id) : doc(collection(newTripRef, "days"));
-        const dayData = { ...day }; delete dayData.id; delete dayData.spots;
-        batch.set(dayRef, dayData); count++;
-        for (const spot of (day.spots || [])) {
-          const spotRef = spot.id ? doc(dayRef, "spots", spot.id) : doc(collection(dayRef, "spots"));
-          const spotData = { ...spot }; delete spotData.id; const wishes = Array.isArray(spotData.wishes) ? spotData.wishes : []; delete spotData.wishes;
-          batch.set(spotRef, spotData); count++;
-          for (const wish of wishes) { const wr = wish.id ? doc(spotRef, "wishes", wish.id) : doc(collection(spotRef, "wishes")); const wd = { ...wish }; delete wd.id; wd.authorUid = ownerUid; batch.set(wr, wd); count++; }
-        }
-      }
-      for (const expense of (payload.expenses || [])) { const er = expense.id ? doc(newTripRef, "expenses", expense.id) : doc(collection(newTripRef, "expenses")); const ed = { ...expense }; delete ed.id; ed.createdByUid = ownerUid; batch.set(er, ed); count++; }
-      if (count > 450) throw new Error("匯入資料過多，請拆分後再匯入（單次限制 450 筆）");
-      batch.set(doc(collection(db, "adminAuditLogs")), { adminUid: ownerUid, adminEmail: currentUser.email || null, tripId: newTripRef.id, action: "import", detail: { sourceTripId: detailCtx?.tripId || null, count }, createdAt: serverTimestamp() });
-      await batch.commit();
-      tripsCache.unshift({ id: newTripRef.id, ...cleanTrip });
-      window.alert("已匯入為新行程，原成員 UID 已清除，匯入者為統籌人。");
-      await showTripDetail(newTripRef.id);
-    } catch (err) { console.error(err); window.alert("匯入失敗：" + (err.message || String(err))); }
-  };
-  input.click();
-}
-
-async function exportTrip() {
-  const { tripId, trip } = detailCtx;
-  const tree = await loadTripTree(tripId, true);
-  const payload = { exportedAt: new Date().toISOString(), trip: { ...trip }, days: tree.days, expenses: tree.expenses };
-  const json = JSON.stringify(payload, function (k, v) {
-    const raw = this[k];
-    return raw && typeof raw.toDate === "function" ? raw.toDate().toISOString() : v;
-  }, 2);
-  await commitWithAudit(tripId, "export", { days: tree.days.length, expenses: tree.expenses.length }, () => {});
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([json], { type: "application/json" }));
-  a.download = `trip-${tripId}.json`;
-  a.click();
-  URL.revokeObjectURL(a.href);
-}
-
-// ------------------------------------------------------------
-// 稽核紀錄檢視（最近 100 筆）
-// ------------------------------------------------------------
-async function showAuditLog() {
-  const back = `<button id="admin-back-btn" class="admin-secondary-btn" style="margin-bottom:12px;">← 回到行程清單</button>`;
-  render(`<div class="admin-card">${back}<p class="admin-muted">載入稽核紀錄中...</p></div>`);
-  document.getElementById("admin-back-btn").onclick = () => showTripList(currentUser);
-  try {
-    const snap = await getDocs(query(collection(db, "adminAuditLogs"), orderBy("createdAt", "desc"), limit(100)));
-    const logs = snap.docs.map((d) => d.data());
-    render(`
-      <div class="admin-card">
-        ${back}
-        <h1>稽核紀錄</h1>
-        <p class="admin-muted">最近 ${logs.length} 筆管理員操作（只能新增、不能修改或刪除）。</p>
-        <div class="admin-table-scroll"><table class="admin-table">
-          <thead><tr><th>時間</th><th>管理員</th><th>動作</th><th>行程 ID</th><th>內容</th></tr></thead>
-          <tbody>${logs.map((l) => `<tr><td data-label="時間">${fmtDate(l.createdAt)}</td><td data-label="管理員">${escapeHtml(l.adminEmail || l.adminUid || "")}</td><td data-label="動作">${escapeHtml(l.action || "")}</td><td data-label="行程 ID"><code>${escapeHtml(l.tripId || "")}</code></td><td data-label="內容" style="font-size:12px;max-width:220px;white-space:normal;word-break:break-all;">${escapeHtml(JSON.stringify(l.detail || {}))}</td></tr>`).join("")}</tbody>
-        </table></div>
-      </div>
-    `);
-    document.getElementById("admin-back-btn").onclick = () => showTripList(currentUser);
-  } catch (err) {
-    console.error(err);
-    render(`<div class="admin-card">${back}<p class="admin-muted">載入失敗：${escapeHtml(err.message || String(err))}</p></div>`);
-    document.getElementById("admin-back-btn").onclick = () => showTripList(currentUser);
-  }
-}
-
-// ------------------------------------------------------------
-// 詳細頁的按鈕事件（事件委派）
-// ------------------------------------------------------------
-async function onRootClick(e) {
-  const el = e.target.closest("[data-act]");
-  if (!el) return;
-  const d = el.dataset;
-  try {
-    if (d.act === "audit") return await showAuditLog();
-    if (d.act === "backup-all") return await exportAllTrips();
-    if (d.act === "legacy-shortlink-delete") {
-      if (!adminCanEdit) return;
-      const input = document.getElementById("legacy-shortlink-code");
-      const code = (input?.value || "").trim().toUpperCase();
-      if (!/^[A-Z0-9]{6}$/.test(code)) return window.alert("請輸入 6 碼舊版代碼");
-      if (!window.confirm(`確定要永久刪除舊版代碼「${code}」嗎？此動作無法復原。`)) return;
-      await deleteKnownShortlink(code);
-      input.value = "";
-      return window.alert("已刪除舊版連結；若原本是邀請連結，其行程內鏡像也已一併刪除。");
-    }
-    if (d.act.startsWith("mem-")) return await onMemberAction(d);
-    if (d.act === "invite-create") {
-      if (!adminCanEdit || !detailCtx) return;
-      const label = document.getElementById("admin-new-invite-label")?.value || "";
-      const expiryRaw = document.getElementById("admin-new-invite-expiry")?.value || "";
-      const expiry = expiryRaw ? parseAdminDatetimeLocal(expiryRaw) : null;
-      if (expiryRaw && !expiry) return window.alert("到期時間格式不正確");
-      const maxRaw = (document.getElementById("admin-new-invite-maxuses")?.value || "").trim();
-      const maxUses = maxRaw ? Math.max(1, Math.min(10000, parseInt(maxRaw, 10) || 0)) : null;
-      if (maxRaw && !maxUses) return window.alert("次數上限請輸入正整數");
-      el.disabled = true;
-      try {
-        await createAdminInviteLink(detailCtx.tripId, { label, expiresAt: expiry, maxUses });
-        await showTripDetail(detailCtx.tripId);
-      } catch (err) {
-        if (err?.message !== "CANCELLED") window.alert("建立邀請連結失敗：" + (err?.message || String(err)));
-        el.disabled = false;
-      }
-      return;
-    }
-    if (!detailCtx) return;
-    const { tripId, trip, tree } = detailCtx;
-    if (d.act === "export") return await exportTrip();
-    if (d.act === "import") return await importTripAsNew();
-    if (d.act === "invite-delete" || d.act === "invite-edit") {
-      if (!adminCanEdit) return;
-      const link = (detailCtx.inviteLinks || []).find(x => x.id === d.code);
-      if (!link) return window.alert("找不到這組邀請連結，請重新整理。");
-      if (d.act === "invite-delete") {
-        const legacy = inviteCodeIsLegacy(d.code);
-        const msg = legacy ? `確定永久刪除舊版 6 碼邀請連結「${d.code}」嗎？` : `確定要撤銷並永久刪除邀請連結「${d.code}」嗎？`;
-        if (!window.confirm(msg + "\n刪除後網址立即失效，且無法恢復。")) return;
-        await deleteAdminInviteLink(tripId, d.code);
-      } else {
-        const expiry = window.prompt("到期時間（YYYY-MM-DDTHH:mm，留空=永久）", adminDatetimeValue(link.expiresAt));
-        if (expiry === null) return;
-        const date = parseAdminDatetimeLocal(expiry.trim());
-        if (expiry.trim() && !date) return window.alert("到期時間格式不正確");
-        const maxRaw = window.prompt("次數上限（留空=無限制）", link.maxUses ? String(link.maxUses) : "");
-        if (maxRaw === null) return;
-        const maxUses = maxRaw.trim() ? Math.max(1, Math.min(10000, parseInt(maxRaw, 10) || 0)) : null;
-        if (maxRaw.trim() && !maxUses) return window.alert("次數上限請輸入正整數");
-        const label = window.prompt("連結用途／標籤（可留空）", link.label || "");
-        if (label === null) return;
-        await updateAdminInviteLink(tripId, d.code, { expiresAt: date, maxUses, label: label.trim().slice(0, 200), updatedAt: serverTimestamp() }, "invite-update", { expiresAt: date ? date.toISOString() : null, maxUses, label: label.trim().slice(0, 200) });
-      }
-      await showTripDetail(tripId);
-      return;
-    }
-    if (d.act === "wishes") {
-      el.disabled = true;
-      el.textContent = "載入中...";
-      const wishes = await loadWishes(tripId, d.day, d.spot);
-      document.getElementById(`wishes-${d.spot}`).innerHTML = wishesHtml(wishes, d.day, d.spot);
-      el.remove();
-      return;
-    }
-    if (!adminCanEdit) return;
-
-    const day = tree.days.find((x) => x.id === d.day);
-    const spot = day?.spots.find((x) => x.id === d.spot);
-    const dayRef = () => doc(db, "trips", tripId, "days", d.day);
-    const spotRef = () => doc(db, "trips", tripId, "days", d.day, "spots", d.spot);
-
-    if (d.act === "rename") {
-      const input = window.prompt("新的行程名稱（1～200 字）", trip.name || "");
-      if (input === null) return;
-      const name = input.trim();
-      if (!name || name.length > 200) return window.alert("名稱長度必須在 1～200 字之間");
-      await commitWithAudit(tripId, "rename", { from: trip.name || "", to: name }, (b) => b.update(doc(db, "trips", tripId), { name }));
-      trip.name = name;
-    } else if (d.act === "spot-edit") {
-      const title = window.prompt("景點名稱", spot?.title || "");
-      if (title === null) return;
-      const time = window.prompt("時間（可留空）", spot?.time || "");
-      if (time === null) return;
-      if (title.length > 500) return window.alert("名稱太長（上限 500 字）");
-      await commitWithAudit(tripId, "spot-edit", { dayId: d.day, spotId: d.spot, fromTitle: spot?.title || "", toTitle: title.trim() }, (b) => b.update(spotRef(), { title: title.trim(), time: time.trim() }));
-    } else if (d.act === "spot-del") {
-      if (!window.confirm(`確定要刪除景點「${spot?.title || ""}」與它的所有留言嗎？此動作無法復原（建議先匯出 JSON）。`)) return;
-      const wishes = await loadWishes(tripId, d.day, d.spot);
-      if (wishes.length > 400) return window.alert("留言超過 400 則，請先個別刪除留言再刪景點");
-      await commitWithAudit(tripId, "spot-delete", { dayId: d.day, spotId: d.spot, title: spot?.title || "", wishes: wishes.length }, (b) => {
-        wishes.forEach((w) => b.delete(doc(db, "trips", tripId, "days", d.day, "spots", d.spot, "wishes", w.id)));
-        b.delete(spotRef());
-      });
-    } else if (d.act === "wish-del") {
-      if (!window.confirm("確定要刪除這則留言嗎？")) return;
-      await commitWithAudit(tripId, "wish-delete", { dayId: d.day, spotId: d.spot, wishId: d.wish }, (b) => b.delete(doc(db, "trips", tripId, "days", d.day, "spots", d.spot, "wishes", d.wish)));
-    } else if (d.act === "exp-del") {
-      const exp = tree.expenses.find((x) => x.id === d.exp);
-      if (!window.confirm(`確定要刪除記帳「${exp?.title || ""}」嗎？`)) return;
-      await commitWithAudit(tripId, "expense-delete", { expenseId: d.exp, title: exp?.title || "", amountCents: exp?.amountCents ?? null }, (b) => b.delete(doc(db, "trips", tripId, "expenses", d.exp)));
-    } else if (d.act === "block-edit" || d.act === "block-del") {
-      const owner = d.spot ? spot : day;
-      const blocks = [...(owner?.blocks || [])];
-      const i = Number(d.idx);
-      if (!blocks[i]) return;
-      if (d.act === "block-edit") {
-        const text = window.prompt("編輯文字內容", blocks[i].content || "");
-        if (text === null) return;
-        blocks[i] = { ...blocks[i], content: text };
-      } else {
-        if (!window.confirm("確定要移除這個內容區塊嗎？")) return;
-        blocks.splice(i, 1);
-      }
-      await commitWithAudit(tripId, d.act, { dayId: d.day, spotId: d.spot || null, index: i }, (b) => b.update(d.spot ? spotRef() : dayRef(), { blocks }));
-    } else if (d.act === "delete-trip" || d.act === "restore-trip") {
-      if (!(await toggleTripDeleted(tripId))) return;
-    } else {
-      return;
-    }
-    await showTripDetail(tripId);
-  } catch (err) {
-    console.error(err);
-    window.alert("操作失敗：" + (err.message || String(err)));
-  }
-}
-root.addEventListener("click", onRootClick);
-
-// ------------------------------------------------------------
-// 行程軟刪除／還原（資料保留，只是一般使用者看不到）
-// ------------------------------------------------------------
-async function toggleTripDeleted(tripId) {
-  const trip = tripsCache.find((t) => t.id === tripId);
-  if (!trip || !adminCanEdit) return false;
-  const nextLabel = trip.deleted === true ? "還原行程" : "刪除行程";
-  if (!(await ensureRecentLogin(nextLabel))) return false;
-  const next = trip.deleted !== true;
-  const name = trip.name || tripId;
-  const msg = next
-    ? `確定要刪除行程「${name}」嗎？\n刪除後所有成員（含統籌人）都看不到這個行程，但資料會保留，之後可在「已刪除」分類還原。建議先匯出 JSON。`
-    : `確定要還原行程「${name}」嗎？\n還原後原本的成員與權限照舊生效。`;
-  if (!window.confirm(msg)) return false;
-  let reason = "";
-  if (next) {
-    const input = window.prompt("刪除原因（選填）：", "");
-    if (input === null) return false;
-    reason = input.trim().slice(0, 300);
-  }
-  const upd = next
-    ? { deleted: true, deletedAt: serverTimestamp(), deletedBy: currentUser?.uid || null, deletedReason: reason }
-    : { deleted: false, deletedAt: null, deletedBy: currentUser?.uid || null, deletedReason: "" };
-  try {
-    await commitWithAudit(tripId, next ? "trip-delete" : "trip-restore", { reason }, (b) => b.update(doc(db, "trips", tripId), upd));
-    Object.assign(trip, upd);
-    return true;
-  } catch (err) {
-    console.error(err);
-    window.alert("操作失敗：" + (err.message || String(err)));
-    return false;
-  }
-}
-
-// ------------------------------------------------------------
-// 成員權限與 UID 編輯（需要 admins/{uid}.canManageMembers = true）
-// ------------------------------------------------------------
-let memberDraft = null;
-
-function memberUidList(m) {
-  let raw = m?.uids;
-  if (typeof raw === "string") {
-    try { const p = JSON.parse(raw); raw = Array.isArray(p) ? p : [raw]; } catch { raw = raw.trim() ? [raw] : []; }
-  }
-  const values = Array.isArray(raw) ? [...raw] : [];
-  if (m?.uid && !values.includes(m.uid)) values.unshift(m.uid);
-  return [...new Set(values.filter((u) => typeof u === "string" && u.trim()))];
-}
-
-async function openMemberEditor(tripId) {
-  const trip = tripsCache.find((t) => t.id === tripId);
-  const snap = await getDoc(doc(db, "trips", tripId));
-  if (!trip || !snap.exists()) return window.alert("找不到這個行程");
-  Object.assign(trip, snap.data());
-  if (trip.authModelVersion !== 2 || !trip.access || !trip.ownerUid) {
-    return window.alert("這是舊版行程（尚未完成身份銜接），請先由統籌人完成資料銜接，再用管理後台調整成員。");
-  }
-  memberDraft = {
-    tripId, trip,
-    // 儲存正規化快照，而不是直接保存 Firestore 原始 JSON。
-    // 這可避免舊資料欄位順序／uid 與 uids 共存等格式差異造成誤判。
-    origJson: JSON.stringify(canonicalMemberSnapshot(trip.members || [])),
-    members: (trip.members || []).map((m) => ({ ...m, uids: memberUidList(m) })),
-  };
-  renderMemberEditor();
-}
-
-function renderMemberEditor() {
-  const { trip, members } = memberDraft;
-  const inputStyle = "flex:1;min-width:200px;padding:8px 10px;border:1px solid var(--border,#DCE3DC);border-radius:8px;font:inherit;";
-  render(`
-    <div class="admin-card">
-      <button class="admin-secondary-btn" data-act="mem-cancel" style="margin-bottom:12px;">← 取消，回到行程</button>
-      <h1>編輯成員權限與 UID</h1>
-      <p class="admin-muted">行程：${escapeHtml(trip.name || "")}。行程必須恰有一位統籌人，且統籌人至少綁定一個 UID；同一個 UID 只能屬於一位成員。選擇「統籌人」會自動把原統籌人降為可編輯。所有變更都會寫入稽核紀錄。</p>
-      ${members.map((m, i) => `
-        <div class="admin-day-block">
-          <div class="admin-row-actions" style="align-items:center;margin-bottom:8px;">
-            <input data-act="mem-name" data-idx="${i}" value="${escapeHtml(m.name || "")}" placeholder="成員姓名／暱稱" style="flex:1;min-width:180px;padding:8px 10px;border:1px solid var(--border,#DCE3DC);border-radius:8px;font:inherit;">
-            ${members.length > 1 ? btn("mem-del", "移除成員", { idx: i }, true) : ""}
-          </div>
-          <label class="admin-muted">權限
-            <select data-act="mem-perm" data-idx="${i}" style="padding:6px;border-radius:8px;border:1px solid var(--border,#DCE3DC);font:inherit;">
-              ${["owner", "editor", "viewer"].map((p) => `<option value="${p}" ${m.permission === p ? "selected" : ""}>${permissionLabel(p)}</option>`).join("")}
-            </select>
-          </label>
-          ${m.uids.length ? m.uids.map((u, j) => `<div class="admin-uid-box" style="margin:6px 0;">${escapeHtml(u)}　${btn("mem-uid-del", "移除", { idx: i, pos: j }, true)}</div>`).join("") : `<p class="admin-muted">尚未綁定任何 UID</p>`}
-          <div class="admin-row-actions">
-            <input id="mem-uid-input-${i}" placeholder="貼上要新增的 UID" style="${inputStyle}">
-            <button class="admin-secondary-btn" data-act="mem-uid-add" data-idx="${i}">新增 UID</button>
-          </div>
-        </div>
-      `).join("")}
-      <button class="admin-secondary-btn" data-act="mem-add">＋ 新增成員</button>
-      <button class="admin-primary-btn" data-act="mem-save">儲存變更</button>
-    </div>
-  `);
-  document.querySelectorAll('[data-act="mem-name"]').forEach((el) => {
-    el.addEventListener("input", () => {
-      const m = members[Number(el.dataset.idx)];
-      if (m) m.name = el.value;
-    });
-  });
-}
-
-async function onMemberAction(d) {
-  if (!adminCanManageMembers) return;
-  if (d.act === "mem-edit") return detailCtx ? await openMemberEditor(detailCtx.tripId) : undefined;
-  if (!memberDraft) return;
-  const { tripId, trip, members } = memberDraft;
-  if (d.act === "mem-cancel") { memberDraft = null; return await showTripDetail(tripId); }
-  if (d.act === "mem-add") {
-    if (members.length >= 100) return window.alert("單一行程最多 100 位成員");
-    members.push({ id: newLocalId(), name: "", permission: "viewer", uids: [] });
-    return renderMemberEditor();
-  }
-  if (d.act === "mem-del") {
-    const idx = Number(d.idx);
-    if (members.length <= 1) return window.alert("至少要保留一位成員");
-    if (members[idx]?.permission === "owner") return window.alert("請先將統籌人改為其他成員後，再移除這位成員");
-    members.splice(idx, 1);
-    return renderMemberEditor();
-  }
-  if (d.act === "mem-uid-del") {
-    members[Number(d.idx)].uids.splice(Number(d.pos), 1);
-    return renderMemberEditor();
-  }
-  if (d.act === "mem-uid-add") {
-    const uid = (document.getElementById(`mem-uid-input-${d.idx}`)?.value || "").trim();
-    if (!/^[A-Za-z0-9:_.-]{6,128}$/.test(uid)) return window.alert("UID 格式看起來不對（只允許英數與 : _ . -，長度 6～128）");
-    const dup = members.find((x) => x.uids.includes(uid));
-    if (dup) return window.alert(`這個 UID 已經綁定在「${dup.name || "（未命名）"}」身上`);
-    members[Number(d.idx)].uids.push(uid);
-    return renderMemberEditor();
-  }
-  if (d.act === "mem-save") {
-    if (!(await ensureRecentLogin("更新成員權限與 UID"))) return;
-    const blankName = members.find((m) => !String(m.name || "").trim());
-    if (blankName) return window.alert("每位成員都需要填寫名稱");
-    const duplicateIds = new Set();
-    for (const m of members) { if (duplicateIds.has(m.id)) return window.alert("成員 ID 發生重複，請取消後重新開啟編輯頁面"); duplicateIds.add(m.id); }
-    const owners = members.filter((m) => m.permission === "owner");
-    if (owners.length !== 1) return window.alert("行程必須恰有一位統籌人");
-    if (!owners[0].uids.length) return window.alert("統籌人至少要綁定一個 UID");
-    const ownerUid = owners[0].uids.includes(trip.ownerUid) ? trip.ownerUid : owners[0].uids[0];
-    const access = {};
-    members.forEach((m) => m.uids.forEach((u) => { access[u] = m.permission; }));
-
-    const orig = JSON.parse(memberDraft.origJson);
-    const changes = members.map((m) => {
-      const o = orig.find((x) => x.id === m.id) || {};
-      const ou = memberUidList(o);
-      return { name: m.name || "", memberId: m.id, from: o.permission || null, to: m.permission, added: m.uids.filter((u) => !ou.includes(u)), removed: ou.filter((u) => !m.uids.includes(u)) };
-    }).filter((c) => c.from !== c.to || c.added.length || c.removed.length);
-    if (!changes.length) return window.alert("沒有任何變更");
-
-    const ownerChanged = ownerUid !== trip.ownerUid;
-    if (!window.confirm(`即將套用 ${changes.length} 位成員的變更${ownerChanged ? "，並且更換統籌人" : ""}。確定嗎？`)) return;
-
-    const newMembers = members.map((m) => ({ ...m, uids: [...m.uids], uid: m.uids[0] || null }));
-    const tripRef = doc(db, "trips", tripId);
-    const auditRef = doc(collection(db, "adminAuditLogs"));
-    try {
-      await runTransaction(db, async (tx) => {
-        const fresh = await tx.get(tripRef);
-        if (!fresh.exists()) throw new Error("行程不存在，請重新整理後再操作");
-        const latest = fresh.data() || {};
-        if (!sameMemberSnapshot(latest.members || [], JSON.parse(memberDraft.origJson))) {
-          throw new Error("MEMBERS_CONFLICT");
-        }
-        const latestOwners = (latest.members || []).filter((m) => m.permission === "owner");
-        if (latestOwners.length !== 1) throw new Error("目前行程的統籌人資料已異常，請先檢查行程資料");
-        tx.update(tripRef, { members: newMembers, access, ownerUid });
-        tx.set(auditRef, {
-          adminUid: currentUser?.uid || null,
-          adminEmail: currentUser?.email || null,
-          tripId,
-          action: "members-update",
-          detail: { changes, ownerChanged },
-          createdAt: serverTimestamp(),
-        });
-      });
-    } catch (err) {
-      console.error("members-update transaction failed", err);
-      if (err?.message === "MEMBERS_CONFLICT") {
-        return window.alert("這個行程的成員資料剛剛被別人修改過，請取消後重新開啟編輯畫面再操作。");
-      }
-      return window.alert("儲存成員權限／UID 失敗：" + (err?.message || String(err)));
-    }
-    Object.assign(trip, { members: newMembers, access, ownerUid });
-    memberDraft = null;
-    await showTripDetail(tripId);
-  }
-}
-
-root.addEventListener("change", (e) => {
-  const el = e.target.closest('select[data-act="mem-perm"]');
-  if (!el || !memberDraft || !adminCanManageMembers) return;
-  const i = Number(el.dataset.idx);
-  memberDraft.members[i].permission = el.value;
-  if (el.value === "owner") {
-    memberDraft.members.forEach((m, j) => { if (j !== i && m.permission === "owner") m.permission = "editor"; });
-    renderMemberEditor();
-  }
-});
-
-// ------------------------------------------------------------
-// 進入點
-// ------------------------------------------------------------
-async function isAdminUser(uid) {
-  const snap = await getDoc(doc(db, "admins", uid));
-  return snap.exists() ? (snap.data() || {}) : null;
-}
-
-window.addEventListener("error", (event) => {
-  console.error("[admin] unhandled error", event.error || event.message);
-  const msg = event.error?.message || event.message || "未知錯誤";
-  if (root) root.innerHTML = `<div class="admin-card"><h1>管理後台載入失敗</h1><p class="admin-muted">${escapeHtml(msg)}</p><p class="admin-muted">請重新整理頁面；若仍發生，請開啟瀏覽器主控台查看錯誤。</p></div>`;
-});
-window.addEventListener("unhandledrejection", (event) => {
-  console.error("[admin] unhandled rejection", event.reason);
-  const msg = event.reason?.message || String(event.reason || "未知錯誤");
-  if (root) root.innerHTML = `<div class="admin-card"><h1>管理後台載入失敗</h1><p class="admin-muted">${escapeHtml(msg)}</p><p class="admin-muted">請重新整理頁面；若仍發生，請開啟瀏覽器主控台查看錯誤。</p></div>`;
-});
-
-render(`<div class="admin-card"><p class="admin-muted">載入中...</p></div>`);
-
-onAuthStateChanged(auth, async (user) => {
-  if (!user) {
-    renderSignedOut();
+    document.getElementById("share-close-btn").onclick = closeModal;
     return;
   }
-  try {
-    const ok = await isAdminUser(user.uid);
-    if (ok) {
-      adminCanEdit = ok.canEdit === true;
-      adminCanManageMembers = ok.canManageMembers === true;
-      lastSignInAt = Date.parse(user.metadata?.lastSignInTime || "") || Date.now();
-      await renderDashboard(user);
-    } else {
-      renderNotAdmin(user);
-    }
-  } catch (err) {
-    console.error(err);
-    render(`
-      <div class="admin-card">
-        <h1>檢查管理員權限時發生錯誤</h1>
-        <p class="admin-muted">${escapeHtml(err.message || String(err))}</p>
-        <button id="admin-signout-btn" class="admin-secondary-btn">登出</button>
-      </div>
+
+  openModal("分享此行程", `<p style="color:var(--text-muted);">正在讀取邀請連結...</p>`);
+  const links = await loadInviteLinks();
+  if (links === null) {
+    openModal("分享此行程", `
+      <p style="color:var(--danger);">邀請連結載入失敗，請確認 Firestore Rules 是否已更新（inviteLinks 集合）。</p>
+      <div class="form-actions"><button class="secondary-btn" id="share-close-btn">關閉</button></div>
     `);
-    document.getElementById("admin-signout-btn").onclick = () => adminSignOut();
+    document.getElementById("share-close-btn").onclick = closeModal;
+    return;
   }
+  const active = links.filter((l) => inviteLinkStatus(l) === "active");
+
+  openModal("分享此行程", `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">把邀請連結傳給同行的人。對方打開後需先申請加入，經你核准並綁定成員身份後，才能看到行程內容。</p>
+    ${active.length ? active.map((l) => {
+      const url = inviteUrlOf(l.id);
+      const expiry = l.expiresAt ? `到期：${toDatetimeLocalValue(l.expiresAt).replace("T", " ")}` : "永久有效";
+      return `
+        <div class="invite-link-card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+            <strong style="font-size:13px;">${escapeHtml(l.label || "（未命名連結）")}</strong>
+            <span style="font-size:12px;color:var(--text-muted);">${escapeHtml(expiry)}</span>
+          </div>
+          <input type="text" readonly value="${escapeHtml(url)}" onclick="this.select()" style="width:100%;margin-top:6px;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+          <button class="secondary-btn full-width copy-share-invite-btn" data-url="${escapeHtml(url)}" style="margin-top:8px;">📋 複製邀請連結</button>
+        </div>`;
+    }).join("") : `<p style="font-size:13px;color:var(--text-muted);">目前沒有可用的邀請連結，請先建立一組。</p>`}
+    <button class="primary-btn full-width" id="create-share-invite-btn" style="margin-top:10px;">＋ 建立新的邀請連結（永久有效）</button>
+    <button class="secondary-btn full-width" id="goto-invite-manage-btn" style="margin-top:8px;">⚙️ 設定到期時間／刪除連結</button>
+    <div class="form-actions">
+      ${navigator.share && active.length ? `<button class="secondary-btn" id="native-share-btn">📤 用系統分享</button>` : ""}
+      <button class="primary-btn" id="share-close-btn">完成</button>
+    </div>
+  `);
+  document.getElementById("share-close-btn").onclick = closeModal;
+  document.querySelectorAll("#modal-box .copy-share-invite-btn").forEach((btn) => {
+    btn.addEventListener("click", () => copyText(btn.dataset.url, "邀請連結已複製"));
+  });
+  document.getElementById("create-share-invite-btn").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.textContent = "建立中...";
+    const result = await createTripInviteLink({});
+    if (!result.code) {
+      toast(shortlinkErrorMessage(result.error));
+      btn.disabled = false;
+      btn.textContent = "＋ 建立新的邀請連結（永久有效）";
+      return;
+    }
+    toast("已建立邀請連結");
+    renderShareTripModal();
+  });
+  document.getElementById("goto-invite-manage-btn").addEventListener("click", () => {
+    closeModal();
+    renderManageMembersModal();
+  });
+  const nativeBtn = document.getElementById("native-share-btn");
+  if (nativeBtn) {
+    nativeBtn.addEventListener("click", () => {
+      navigator.share({ title: state.trip?.name || "旅行行程", url: inviteUrlOf(active[0].id) }).catch(() => {});
+    });
+  }
+}
+
+document.getElementById("appearance-btn").addEventListener("click", renderAppearanceModal);
+
+function renderAppearanceModal() {
+  const current = loadAppearance();
+
+  openModal("外觀設定", `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">這些設定只會套用在這台裝置／瀏覽器上，不會影響同行人看到的樣子。</p>
+
+    <div class="form-row">
+      <label>色彩主題</label>
+      <div class="theme-swatch-grid" id="theme-swatch-grid">
+        ${THEME_PRESETS.map((t) => `
+          <button class="theme-swatch ${current.themeId === t.id ? "active" : ""}" data-theme="${t.id}">
+            <span class="theme-swatch-dot" style="background:${t.primary};"></span>
+            <span class="theme-swatch-label">${escapeHtml(t.name)}</span>
+          </button>
+        `).join("")}
+      </div>
+    </div>
+
+    <div class="form-row">
+      <label>字體風格</label>
+      <div class="font-option-list" id="font-option-list">
+        ${FONT_PRESETS.map((f) => `
+          <button class="font-option-btn ${current.fontId === f.id ? "active" : ""}" data-font="${f.id}">
+            <span class="font-option-preview" style="font-family:${f.heading};">旅程 Aa</span>
+            <span class="font-option-name">${escapeHtml(f.name)}</span>
+          </button>
+        `).join("")}
+      </div>
+    </div>
+
+    <div class="form-row">
+      <label>文字大小</label>
+      <div class="size-option-row" id="size-option-row">
+        ${SIZE_PRESETS.map((s) => `
+          <button class="size-option-btn ${current.sizeId === s.id ? "active" : ""}" data-size="${s.id}">${escapeHtml(s.name)}</button>
+        `).join("")}
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <button class="secondary-btn" id="appearance-reset-btn">恢復預設</button>
+      <button class="primary-btn" id="appearance-close-btn">完成</button>
+    </div>
+  `);
+
+  const applyAndSave = (patch) => {
+    const settings = { ...loadAppearance(), ...patch };
+    saveAppearance(settings);
+    applyAppearance(settings);
+  };
+
+  document.querySelectorAll("#theme-swatch-grid .theme-swatch").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      applyAndSave({ themeId: btn.dataset.theme });
+      document.querySelectorAll("#theme-swatch-grid .theme-swatch").forEach((b) => b.classList.toggle("active", b === btn));
+    });
+  });
+  document.querySelectorAll("#font-option-list .font-option-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      applyAndSave({ fontId: btn.dataset.font });
+      document.querySelectorAll("#font-option-list .font-option-btn").forEach((b) => b.classList.toggle("active", b === btn));
+    });
+  });
+  document.querySelectorAll("#size-option-row .size-option-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      applyAndSave({ sizeId: btn.dataset.size });
+      document.querySelectorAll("#size-option-row .size-option-btn").forEach((b) => b.classList.toggle("active", b === btn));
+    });
+  });
+  document.getElementById("appearance-reset-btn").addEventListener("click", () => {
+    const defaults = { themeId: "ocean", fontId: "journal", sizeId: "md" };
+    saveAppearance(defaults);
+    applyAppearance(defaults);
+    closeModal();
+    renderAppearanceModal();
+  });
+  document.getElementById("appearance-close-btn").onclick = closeModal;
+}
+
+document.getElementById("menu-toggle-btn").addEventListener("click", () => {
+  document.getElementById("menu-overlay").classList.remove("hidden");
+  document.getElementById("trip-menu").classList.remove("hidden");
+});
+document.getElementById("menu-close-btn").addEventListener("click", closeMenu);
+document.getElementById("menu-overlay").addEventListener("click", closeMenu);
+function closeMenu() {
+  document.getElementById("menu-overlay").classList.add("hidden");
+  document.getElementById("trip-menu").classList.add("hidden");
+}
+
+function renderTripMenu() {
+  ["manage-members-menu-btn", "currency-settings-menu-btn", "background-settings-menu-btn"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.remove();
+  });
+  if (state.trip && isOwner()) {
+    const mkBtn = (id, label, onClick) => {
+      const btn = document.createElement("button");
+      btn.id = id;
+      btn.className = "secondary-btn full-width";
+      btn.style.margin = "0 12px 10px";
+      btn.style.width = "calc(100% - 24px)";
+      btn.textContent = label;
+      btn.addEventListener("click", () => { closeMenu(); onClick(); });
+      document.getElementById("new-trip-btn").insertAdjacentElement("beforebegin", btn);
+    };
+    mkBtn("background-settings-menu-btn", "🖼️ 背景圖片設定", renderBackgroundSettingsModal);
+    mkBtn("currency-settings-menu-btn", "💱 貨幣設定", renderCurrencySettingsModal);
+    mkBtn("manage-members-menu-btn", "👥 管理成員與權限", renderManageMembersModal);
+  }
+
+  const list = document.getElementById("trip-list");
+  const trips = getMyTrips();
+  if (!trips.length) {
+    list.innerHTML = `<li style="color:var(--text-muted);cursor:default;">還沒有任何行程</li>`;
+  } else {
+    list.innerHTML = trips.map((t) => `
+      <li class="${t.id === state.tripId ? "active" : ""}" data-tripid="${t.id}">
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(t.name)}</span>
+        <span class="icon-btn remove-trip-btn" data-tripid="${t.id}" title="從清單移除" style="font-size:14px;">✕</span>
+      </li>`).join("");
+    list.querySelectorAll("li[data-tripid]").forEach((li) => {
+      li.addEventListener("click", (e) => {
+        if (e.target.classList.contains("remove-trip-btn")) return;
+        navigate(`#/trip/${li.dataset.tripid}`);
+        closeMenu();
+      });
+    });
+    list.querySelectorAll(".remove-trip-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        removeMyTrip(btn.dataset.tripid);
+        renderTripMenu();
+      });
+    });
+  }
+}
+
+document.getElementById("new-trip-btn").addEventListener("click", () => {
+  closeMenu();
+  renderNewTripModal();
+});
+document.getElementById("show-uid-btn").addEventListener("click", () => {
+  closeMenu();
+  const uid = currentUid();
+  if (!uid) return toast("目前尚未取得 Firebase UID");
+  openModal("目前裝置 UID", `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">這是這台裝置／瀏覽器的匿名識別碼。若統籌人需要手動幫你綁定成員身份，把下面這串傳給統籌人即可。</p>
+    <div class="form-row"><input type="text" id="device-uid-input" readonly value="${escapeHtml(uid)}" onclick="this.select()"></div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="uid-close-btn">關閉</button>
+      <button class="primary-btn" id="uid-copy-btn">複製 UID</button>
+    </div>
+  `);
+  document.getElementById("uid-close-btn").onclick = closeModal;
+  document.getElementById("uid-copy-btn").onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(uid);
+      toast("UID 已複製");
+    } catch (err) {
+      console.error(err);
+      toast("無法自動複製，請長按或手動選取 UID");
+    }
+  };
+});
+document.getElementById("join-trip-btn").addEventListener("click", () => {
+  closeMenu();
+  openModal("用邀請連結加入行程", `
+    <div class="form-row">
+      <label>貼上統籌人傳給你的邀請連結</label>
+      <input type="text" id="join-input" placeholder="https://.../#/s/ABCDEF234567 或 ABCDEF234567">
+    </div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="join-cancel">取消</button>
+      <button class="primary-btn" id="join-confirm">加入</button>
+    </div>
+  `);
+  document.getElementById("join-cancel").onclick = closeModal;
+  document.getElementById("join-confirm").onclick = async () => {
+    const raw = document.getElementById("join-input").value.trim();
+    if (!raw) return;
+    closeModal();
+    await handleJoinInput(raw);
+  };
+});
+
+async function handleJoinInput(raw) {
+  // 完整的舊版行程連結：.../#/trip/xxxxxx（也支援單純貼 Firestore 行程 ID 的舊用法）
+  let m = raw.match(/trip\/([a-zA-Z0-9]+)/);
+  if (m) {
+    navigate(`#/trip/${m[1]}`);
+    return;
+  }
+  // 新版短連結格式：.../#/s/CODE，或直接貼 12 碼代碼。
+  // 6 碼舊版代碼不再視為可加入行程的有效輸入；舊資料請由管理者清理。
+  const shortPath = raw.match(/\/s\/([a-zA-Z0-9]+)/);
+  const code = (shortPath ? shortPath[1] : raw).toUpperCase();
+  if (shortPath && code.length === 6) {
+    toast("6 碼舊版代碼已停止使用，請索取新的 12 碼邀請連結");
+    return;
+  }
+  if (/^[A-Z0-9]{12}$/.test(code)) {
+    navigate(`#/s/${code}`);
+    return;
+  }
+  if (/^[A-Z0-9]{6}$/.test(raw)) {
+    toast("6 碼舊版代碼已停止使用，請索取新的 12 碼邀請代碼");
+    return;
+  }
+  // 長度看起來不像短代碼，當作行程 ID 直接嘗試
+  navigate(`#/trip/${raw}`);
+}
+
+// ------------------------------------------------------------
+// 短代碼／短連結（shortlinks 集合）
+// 用一組 12 碼英數字代碼取代原本又長又難輸入的行程 ID／同步資料，
+// 存一份對照資料在 Firestore 的 shortlinks/{code}，任何人都能用代碼查（get），
+// 但無法列出所有代碼、也無法竄改或刪除已存在的代碼（見 README 的安全規則）。
+// ------------------------------------------------------------
+const SHORT_CODE_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"; // 排除容易看錯的 0/O/1/I/L
+function genShortCode(len = 12) {
+  // 使用 Web Crypto 產生不可預測的隨機索引，避免 Math.random() 可預測。
+  const values = new Uint32Array(len);
+  crypto.getRandomValues(values);
+  let s = "";
+  for (let i = 0; i < len; i++) s += SHORT_CODE_CHARS[values[i] % SHORT_CODE_CHARS.length];
+  return s;
+}
+async function createShortlink(data, attempts = 6) {
+  for (let i = 0; i < attempts; i++) {
+    const code = genShortCode();
+    try {
+      await setDoc(doc(db, "shortlinks", code), { ...data, createdBy: currentUid(), createdAt: serverTimestamp() });
+      return { code, error: null };
+    } catch (err) {
+      console.error("[shortlinks] 建立代碼失敗", err);
+      // 權限被拒（Firestore 規則沒開放）不管重試幾次結果都一樣，直接回報，不要浪費時間重試
+      if (err && err.code === "permission-denied") {
+        return { code: null, error: "permission-denied" };
+      }
+      // 其他錯誤（例如剛好撞到別人已經用過的代碼，極少見）就重新抽一組再試
+    }
+  }
+  return { code: null, error: "unknown" };
+}
+async function getShortlinkData(code) {
+  try {
+    const snap = await getDoc(doc(db, "shortlinks", String(code).trim().toUpperCase()));
+    if (!snap.exists()) return null;
+    return snap.data();
+  } catch (err) {
+    console.error("[shortlinks] 查詢代碼失敗", err);
+    return null;
+  }
+}
+function shortlinkErrorMessage(error) {
+  if (error === "permission-denied") {
+    return "連結產生失敗：Firestore 安全規則可能還沒加上 shortlinks 那段設定。請到 Firebase 主控台 → Firestore Database → 規則分頁，確認內容包含 shortlinks 集合的規則（見 README「Part 3：設定 Firestore 安全規則」），改好後記得按「發布」，再回來試一次。";
+  }
+  return "連結產生失敗，請確認網路連線後再試一次。（可以打開瀏覽器開發者工具的 Console 分頁，看看有沒有更詳細的錯誤訊息）";
+}
+function copyText(text, successMsg) {
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(text).then(() => toast(successMsg));
+  } else {
+    toast("請手動複製");
+  }
+}
+
+// ------------------------------------------------------------
+// 跨裝置同步「我的行程」清單
+// 因為沒有帳號登入，這份清單只存在單一瀏覽器裡。
+// 這個功能讓使用者把清單打包成一組短代碼／短連結，帶到另一台裝置匯入。
+// ------------------------------------------------------------
+function decodeSyncCode(code) {
+  return JSON.parse(decodeURIComponent(atob(code)));
+}
+
+function applyIncomingTripList(list) {
+  const existing = getMyTrips();
+  const existingIds = new Set(existing.map((t) => t.id));
+  let addedCount = 0;
+  list.forEach((t) => {
+    if (t && t.id && t.name && !existingIds.has(t.id)) {
+      existing.push({ id: t.id, name: t.name });
+      existingIds.add(t.id);
+      addedCount++;
+    }
+  });
+  localStorage.setItem(LS_MY_TRIPS, JSON.stringify(existing.slice(0, 30)));
+  toast(addedCount ? `已匯入 ${addedCount} 個行程到這台裝置` : "這台裝置的清單已經是最新的了");
+  navigate("");
+}
+
+async function importSyncCode(rawCode) {
+  // 相容舊版連結：舊連結會把整份清單直接編碼在網址裡
+  try {
+    const legacy = decodeSyncCode(rawCode);
+    if (Array.isArray(legacy)) {
+      applyIncomingTripList(legacy);
+      return;
+    }
+  } catch {
+    // 不是舊格式，當作新版的 Firestore 短代碼繼續查詢
+  }
+  renderLoading();
+  const normalizedCode = String(rawCode).trim().toUpperCase();
+  const data = await getShortlinkData(normalizedCode);
+  if (data && data.type === "sync" && normalizedCode.length === 6) {
+    toast("這是舊版 6 碼同步連結，已停止使用，請重新產生 12 碼同步連結");
+    navigate("");
+    return;
+  }
+  if (!data || data.type !== "sync" || !Array.isArray(data.list)) {
+    toast("同步代碼無效或已失效，請確認複製完整");
+    navigate("");
+    return;
+  }
+  applyIncomingTripList(data.list);
+}
+
+document.getElementById("sync-devices-btn").addEventListener("click", () => {
+  closeMenu();
+  renderSyncDevicesModal();
+});
+
+async function renderSyncDevicesModal() {
+  const trips = getMyTrips();
+  openModal("跨裝置同步清單", `<p style="color:var(--text-muted);">正在產生同步代碼...</p>`);
+  const { code, error } = await createShortlink({ type: "sync", list: trips });
+  if (!code) {
+    openModal("跨裝置同步清單", `
+      <p style="color:var(--danger);">${shortlinkErrorMessage(error)}</p>
+      <div class="form-actions"><button class="secondary-btn" id="sync-close-btn">關閉</button></div>
+    `);
+    document.getElementById("sync-close-btn").onclick = closeModal;
+    return;
+  }
+  const link = `${window.location.origin}${window.location.pathname}#/import/${code}`;
+
+  openModal("跨裝置同步清單", `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">
+      在這台裝置上，把下面的短連結或代碼傳給你自己（例如用 LINE「傳給自己」），在另一台裝置打開連結、或在下方貼上代碼匯入，就能把目前的 ${trips.length} 個行程一次加進那台裝置的清單。
+    </p>
+    <div class="form-row">
+      <label>同步連結</label>
+      <input type="text" id="sync-link" readonly value="${escapeHtml(link)}" onclick="this.select()">
+    </div>
+    <button class="secondary-btn full-width" id="copy-sync-link-btn">📋 複製連結</button>
+
+    <div class="form-row" style="margin-top:14px;">
+      <label>同步代碼</label>
+      <input type="text" id="sync-code" readonly value="${escapeHtml(code)}" onclick="this.select()" style="font-size:20px;letter-spacing:3px;text-align:center;font-weight:700;">
+    </div>
+    <button class="secondary-btn full-width" id="copy-sync-code-btn">📋 複製代碼</button>
+
+    <div style="margin:20px 0 12px;border-top:1px dashed var(--border);"></div>
+
+    <p style="font-size:13px;color:var(--text-muted);">或者，如果你手上已經有別台裝置給你的同步連結或代碼，貼在這裡匯入：</p>
+    <div class="form-row" style="display:flex;gap:8px;">
+      <input type="text" id="import-code-input" placeholder="貼上同步連結或代碼" style="flex:1;">
+      <button class="primary-btn" id="import-code-btn">匯入</button>
+    </div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="sync-close-btn">關閉</button>
+    </div>
+  `);
+  document.getElementById("sync-close-btn").onclick = closeModal;
+  document.getElementById("copy-sync-link-btn").addEventListener("click", () => copyText(link, "連結已複製"));
+  document.getElementById("copy-sync-code-btn").addEventListener("click", () => copyText(code, "代碼已複製"));
+  document.getElementById("import-code-btn").addEventListener("click", () => {
+    const raw = document.getElementById("import-code-input").value.trim();
+    if (!raw) return;
+    let inputCode = raw;
+    const m = raw.match(/import\/([^/?#]+)/);
+    if (m) inputCode = decodeURIComponent(m[1]);
+    closeModal();
+    importSyncCode(inputCode);
+  });
+}
+
+// ------------------------------------------------------------
+// 歡迎頁（尚未選擇行程）
+// ------------------------------------------------------------
+function renderWelcome() {
+  const root = document.getElementById("app-root");
+  const trips = getMyTrips();
+  root.innerHTML = `
+    <div class="card" style="text-align:center;padding:36px 20px;">
+      <h2 style="margin-top:0;">✈️ 旅行行程規劃工具</h2>
+      <p style="color:var(--text-muted);">建立一個新行程，或從左上角選單切換到你之前建立/加入過的行程。</p>
+      <button id="welcome-new-trip" class="primary-btn" style="margin-top:10px;">＋ 建立新行程</button>
+    </div>
+    ${trips.length ? `
+      <div class="section-title">你最近的行程</div>
+      ${trips.map((t) => `<div class="card spot-item" data-tripid="${t.id}"><span class="spot-title">${escapeHtml(t.name)}</span><span>›</span></div>`).join("")}
+    ` : ""}
+  `;
+  document.getElementById("welcome-new-trip").addEventListener("click", renderNewTripModal);
+  root.querySelectorAll("[data-tripid]").forEach((el) => {
+    el.addEventListener("click", () => navigate(`#/trip/${el.dataset.tripid}`));
+  });
+}
+
+function renderLoading() {
+  document.getElementById("app-root").innerHTML = `<div id="loading-screen"><p>載入中...</p></div>`;
+}
+
+// ------------------------------------------------------------
+// 建立新行程 Modal（含動態成員名單）
+// ------------------------------------------------------------
+function renderNewTripModal() {
+  let members = [
+    { localId: "m1", name: "", permission: "owner" },
+    { localId: "m2", name: "", permission: "editor" },
+  ];
+
+  function rowHtml(m, idx) {
+    return `
+      <div class="block-editor-row" data-row="${m.localId}">
+        <input type="text" placeholder="成員姓名 / 暱稱" value="${escapeHtml(m.name)}" data-field="name" data-row="${m.localId}" style="flex:1;min-width:120px;padding:8px;border:1px solid var(--border);border-radius:8px;">
+        <select data-field="permission" data-row="${m.localId}" style="padding:8px;border:1px solid var(--border);border-radius:8px;">
+          <option value="owner" ${m.permission === "owner" ? "selected" : ""}>統籌人（可編輯+管理成員）</option>
+          <option value="editor" ${m.permission === "editor" ? "selected" : ""}>可編輯行程</option>
+          <option value="viewer" ${m.permission === "viewer" ? "selected" : ""}>僅可瀏覽</option>
+        </select>
+        <button class="icon-btn remove-member-row" data-row="${m.localId}" ${members.length <= 1 ? "disabled" : ""}>✕</button>
+      </div>`;
+  }
+
+  function renderRows() {
+    const wrap = document.getElementById("new-trip-members");
+    wrap.innerHTML = members.map(rowHtml).join("");
+    wrap.querySelectorAll("input[data-field=name]").forEach((inp) => {
+      inp.addEventListener("input", () => {
+        const m = members.find((x) => x.localId === inp.dataset.row);
+        m.name = inp.value;
+      });
+    });
+    wrap.querySelectorAll("select[data-field=permission]").forEach((sel) => {
+      sel.addEventListener("change", () => {
+        const m = members.find((x) => x.localId === sel.dataset.row);
+        m.permission = sel.value;
+      });
+    });
+    wrap.querySelectorAll(".remove-member-row").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        members = members.filter((x) => x.localId !== btn.dataset.row);
+        renderRows();
+      });
+    });
+  }
+
+  openModal("建立新行程", `
+    <div class="form-row">
+      <label>行程名稱</label>
+      <input type="text" id="new-trip-name" placeholder="例如：東京六日遊">
+    </div>
+    <div class="form-row">
+      <label>同行成員與權限（之後隨時可以在「管理成員」調整）</label>
+      <div id="new-trip-members"></div>
+      <button class="secondary-btn small-btn" id="add-member-row-btn" style="margin-top:4px;">＋ 新增成員</button>
+    </div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="new-trip-cancel">取消</button>
+      <button class="primary-btn" id="new-trip-confirm">建立行程</button>
+    </div>
+  `);
+  renderRows();
+  document.getElementById("add-member-row-btn").addEventListener("click", () => {
+    members.push({ localId: "m" + (members.length + 1) + "_" + Date.now(), name: "", permission: "editor" });
+    renderRows();
+  });
+  document.getElementById("new-trip-cancel").onclick = closeModal;
+  document.getElementById("new-trip-confirm").onclick = async () => {
+    const name = document.getElementById("new-trip-name").value.trim();
+    const validMembers = members.filter((m) => m.name.trim());
+    if (!name) return toast("請輸入行程名稱");
+    if (!validMembers.length) return toast("至少要有一位成員");
+    const finalMembers = validMembers.map((m) => ({ id: newLocalId(), name: m.name.trim(), permission: m.permission }));
+    closeModal();
+    renderLoading();
+    const tripId = await createTrip(name, finalMembers);
+    navigate(`#/trip/${tripId}`);
+  };
+}
+
+function permLabel(p) {
+  if (p === "owner") return "統籌人";
+  if (p === "editor") return "可編輯";
+  return "唯讀";
+}
+
+
+// 「我是原統籌人，進行資料銜接」按鈕的行為
+function attachClaimLegacyHandler(btn) {
+  if (!btn) return;
+  btn.onclick = async () => {
+    if (!confirm("請確認你是這個舊行程原本的統籌人。確認後，此行程會綁定目前瀏覽器的匿名身份。")) return;
+    try {
+      btn.disabled = true;
+      await claimLegacyTrip();
+    } catch (err) {
+      console.error(err);
+      toast("資料銜接失敗，請先確認 Firebase 規則仍允許舊資料遷移");
+      btn.disabled = false;
+    }
+  };
+}
+
+// 「申請編輯權限」按鈕的行為
+function attachRequestAccessHandler(btn) {
+  if (!btn) return;
+  btn.onclick = async () => {
+    try {
+      btn.disabled = true;
+      await createEditAccessRequest();
+    } catch (err) {
+      console.error(err);
+      toast("申請送出失敗，請確認 Firebase 規則已更新");
+    }
+    btn.disabled = false;
+  };
+}
+
+// ------------------------------------------------------------
+// 未綁定成員身份者看到的畫面（不顯示任何天數／景點／記帳內容）
+// ------------------------------------------------------------
+function renderAccessGate() {
+  const root = document.getElementById("app-root");
+  const legacy = isLegacyTrip();
+  root.innerHTML = `
+    <div class="card" style="text-align:center;padding:36px 20px;">
+      <h3 style="margin-top:0;">🔒 尚未綁定此行程的成員身份</h3>
+      ${legacy ? `
+        <p style="color:var(--text-muted);">這是舊版行程資料，尚未綁定新的身份權限。若你是原統籌人，請進行資料銜接。</p>
+        <button class="primary-btn" id="claim-legacy-trip-btn">我是原統籌人，進行資料銜接</button>
+      ` : `
+        <p style="color:var(--text-muted);">${state.openedViaInvite ? "你是透過邀請連結進入此行程。" : ""}行程內容僅限成員查看。請按下方按鈕向統籌人提出申請，核准後就能看到行程內容。</p>
+        <button class="primary-btn" id="request-edit-access-btn">申請加入此行程</button>
+        <p style="font-size:12px;color:var(--text-muted);margin-top:14px;">也可以在左側選單點「顯示目前裝置 UID」，把 UID 傳給統籌人，由統籌人手動幫你綁定。</p>
+      `}
+    </div>
+  `;
+  attachClaimLegacyHandler(document.getElementById("claim-legacy-trip-btn"));
+  attachRequestAccessHandler(document.getElementById("request-edit-access-btn"));
+}
+
+function renderTripDeleted() {
+  const root = document.getElementById("app-root");
+  root.innerHTML = `
+    <div class="card" style="text-align:center;padding:36px 20px;">
+      <h3 style="margin-top:0;">🗑️ 此行程已被刪除</h3>
+      <p style="color:var(--text-muted);">這個行程已被系統管理員刪除，無法再檢視或編輯。如果你認為這是誤刪，請聯絡系統管理員協助還原。</p>
+    </div>
+  `;
+}
+
+function renderTripDisabled() {
+  const root = document.getElementById("app-root");
+  root.innerHTML = `
+    <div class="card" style="text-align:center;padding:36px 20px;">
+      <h3 style="margin-top:0;">🚫 此行程已被系統管理員停用</h3>
+      <p style="color:var(--text-muted);">暫時無法檢視或編輯此行程的內容（包含統籌人）。如果你認為這是誤判，請聯絡系統管理員。</p>
+    </div>
+  `;
+}
+
+// ------------------------------------------------------------
+// 行程主頁（頂端 行程/記帳 分頁 + 天數 tabs + 當日內容）
+// ------------------------------------------------------------
+function renderTripHome() {
+  const root = document.getElementById("app-root");
+  const day = state.days.find((d) => d.id === state.currentDayId);
+
+  root.innerHTML = `
+    <div class="tabs">
+      <button class="tab-btn ${state.tripSection === "itinerary" ? "active" : ""}" id="tab-itinerary">📅 行程</button>
+      <button class="tab-btn ${state.tripSection === "expenses" ? "active" : ""}" id="tab-expenses">💰 記帳與分帳</button>
+    </div>
+    ${isLegacyTrip() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>這是舊版行程資料，目前尚未綁定新的身份權限。</span><button class="secondary-btn small-btn" id="claim-legacy-trip-btn">我是原統籌人，進行資料銜接</button></div>` : (!canEditItinerary() ? `<div class="readonly-banner" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;"><span>你目前是唯讀身份，可以瀏覽行程與記帳內容，並在許願池留言，但無法新增或編輯行程內容與記帳。</span><button class="secondary-btn small-btn" id="request-edit-access-btn">申請編輯權限</button></div>` : "")}
+    <div id="day-selector-wrap"></div>
+    <div id="day-content"></div>
+  `;
+
+  attachClaimLegacyHandler(document.getElementById("claim-legacy-trip-btn"));
+  attachRequestAccessHandler(document.getElementById("request-edit-access-btn"));
+
+  document.getElementById("tab-itinerary").onclick = () => navigate(`#/trip/${state.tripId}${state.currentDayId ? "/day/" + state.currentDayId : ""}`);
+  document.getElementById("tab-expenses").onclick = () => navigate(`#/trip/${state.tripId}/expenses`);
+
+  renderDaySelector(document.getElementById("day-selector-wrap"), day);
+
+  const contentEl = document.getElementById("day-content");
+  if (!day) {
+    contentEl.innerHTML = `<div class="empty-hint">${canEditItinerary() ? "還沒有任何天數，點上方「＋ 新增天數」開始規劃吧！" : "行程統籌人還沒有新增任何天數。"}</div>`;
+    return;
+  }
+
+  contentEl.innerHTML = `
+    <div class="card" id="day-header-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <div style="font-weight:700;font-size:16px;">${escapeHtml(day.title)}</div>
+          ${day.date ? `<div style="color:var(--text-muted);font-size:13px;margin-top:2px;">${escapeHtml(day.date)}</div>` : ""}
+        </div>
+        ${canEditItinerary() ? `
+          <div style="display:flex;gap:6px;">
+            <button class="secondary-btn small-btn" id="edit-day-meta-btn">編輯</button>
+            <button class="danger-btn small-btn" id="delete-day-btn">刪除本日</button>
+          </div>` : ""}
+      </div>
+      <div id="day-blocks" style="margin-top:12px;"></div>
+    </div>
+    <div class="section-title">時段 / 景點</div>
+    <div id="spot-list"></div>
+    ${canEditItinerary() ? `<button class="primary-btn full-width" id="add-spot-btn">＋ 新增時段／景點</button>` : ""}
+  `;
+
+  renderContentBlocks(document.getElementById("day-blocks"), day.blocks || [], {
+    editable: canEditItinerary(),
+    onChange: (blocks) => updateDayBlocks(day.id, blocks),
+  });
+
+  if (canEditItinerary()) {
+    document.getElementById("edit-day-meta-btn").addEventListener("click", () => renderEditDayMetaModal(day));
+    document.getElementById("delete-day-btn").addEventListener("click", () => {
+      openConfirm(`確定要刪除「${day.title}」整天的行程嗎？裡面的景點也會一併刪除。`, async () => {
+        await deleteDay(day.id);
+        state.currentDayId = null;
+        navigate(`#/trip/${state.tripId}`);
+        toast("已刪除");
+      });
+    });
+    document.getElementById("add-spot-btn").addEventListener("click", () => renderAddSpotModal(day.id));
+  }
+
+  const spotListEl = document.getElementById("spot-list");
+  const canEdit = canEditItinerary();
+  if (!state.spots.length) {
+    spotListEl.innerHTML = `<div class="empty-hint">這天還沒有安排景點</div>`;
+  } else {
+    spotListEl.innerHTML = state.spots.map((s, i) => `
+      <div class="spot-item" data-spotid="${s.id}" data-drag-index="${i}" title="可拖曳排序景點">
+        ${canEdit ? `
+          <div class="reorder-col">
+            <button class="reorder-btn" data-move="up" data-idx="${i}" ${i === 0 ? "disabled" : ""}>▲</button>
+            <button class="reorder-btn" data-move="down" data-idx="${i}" ${i === state.spots.length - 1 ? "disabled" : ""}>▼</button>
+          </div>
+        ` : ""}
+        <div class="spot-time">${escapeHtml(s.time || "")}</div>
+        <div class="spot-title" data-nav="${s.id}">${escapeHtml(s.title)}</div>
+        <div data-nav="${s.id}">›</div>
+      </div>`).join("");
+    spotListEl.querySelectorAll("[data-nav]").forEach((el) => {
+      el.addEventListener("click", () => {
+        navigate(`#/trip/${state.tripId}/day/${day.id}/spot/${el.dataset.nav}`);
+      });
+    });
+    spotListEl.querySelectorAll(".reorder-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const idx = Number(btn.dataset.idx);
+        moveSpot(day.id, idx, btn.dataset.move === "up" ? -1 : 1);
+      });
+    });
+    if (canEdit) enableDragReorder(spotListEl, ".spot-item", (from, to) => reorderSpotsByDrag(day.id, from, to));
+  }
+}
+
+function dayIndexLabel(dayId) {
+  const idx = state.days.findIndex((d) => d.id === dayId);
+  return idx >= 0 ? idx + 1 : "?";
+}
+
+function enableDragReorder(container, itemSelector, onMove) {
+  let dragged = null;
+  container.querySelectorAll(itemSelector).forEach((item) => {
+    item.draggable = true;
+    item.addEventListener("dragstart", (e) => {
+      dragged = item;
+      item.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", item.dataset.dragIndex || "");
+    });
+    item.addEventListener("dragend", () => {
+      item.classList.remove("dragging");
+      dragged = null;
+      container.querySelectorAll(itemSelector).forEach((el) => el.classList.remove("drag-over"));
+    });
+    item.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      if (dragged && dragged !== item) item.classList.add("drag-over");
+      e.dataTransfer.dropEffect = "move";
+    });
+    item.addEventListener("dragleave", () => item.classList.remove("drag-over"));
+    item.addEventListener("drop", (e) => {
+      e.preventDefault();
+      item.classList.remove("drag-over");
+      if (!dragged || dragged === item) return;
+      const from = Number(dragged.dataset.dragIndex);
+      const to = Number(item.dataset.dragIndex);
+      if (Number.isInteger(from) && Number.isInteger(to) && from !== to) onMove(from, to);
+    });
+  });
+}
+
+async function reorderDaysByDrag(from, to) {
+  if (!canEditItinerary() || from === to) return;
+  const ordered = [...state.days].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  const [moved] = ordered.splice(from, 1);
+  ordered.splice(to, 0, moved);
+  const batchRef = writeBatch(db);
+  ordered.forEach((d, i) => batchRef.update(doc(db, "trips", state.tripId, "days", d.id), { order: i }));
+  await batchRef.commit();
+}
+
+async function reorderSpotsByDrag(dayId, from, to) {
+  if (!canEditItinerary() || from === to) return;
+  const ordered = [...state.spots].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  const [moved] = ordered.splice(from, 1);
+  ordered.splice(to, 0, moved);
+  const batchRef = writeBatch(db);
+  ordered.forEach((spot, i) => batchRef.update(doc(db, "trips", state.tripId, "days", dayId, "spots", spot.id), { order: i }));
+  await batchRef.commit();
+}
+
+function renderDaySelector(container, day) {
+  if (!state.days.length) {
+    container.innerHTML = canEditItinerary()
+      ? `<button class="day-selector-btn" id="day-selector-add-btn"><span class="day-selector-title">＋ 新增天數</span></button>`
+      : "";
+    const addBtn = document.getElementById("day-selector-add-btn");
+    if (addBtn) addBtn.addEventListener("click", renderAddDayModal);
+    return;
+  }
+  container.innerHTML = `
+    <button class="day-selector-btn" id="day-selector-btn">
+      <span class="day-selector-num">Day ${dayIndexLabel(state.currentDayId)}</span>
+      <span class="day-selector-title">${day ? escapeHtml(day.title) : "選擇天數"}</span>
+      ${day && day.date ? `<span class="day-selector-date">${escapeHtml(day.date)}</span>` : ""}
+      <span class="day-selector-chevron">▾</span>
+    </button>
+  `;
+  document.getElementById("day-selector-btn").addEventListener("click", renderDaySelectSheet);
+}
+
+function renderDaySelectSheet() {
+  const canEdit = canEditItinerary();
+  openModal("選擇天數", `
+    <div class="day-select-list">
+      ${state.days.map((d, i) => `
+        <div class="day-select-item ${d.id === state.currentDayId ? "active" : ""}" data-dayid="${d.id}" data-drag-index="${i}" title="可拖曳排序天數">
+          ${canEdit ? `
+            <div class="reorder-col">
+              <button class="reorder-btn" data-move="up" data-idx="${i}" ${i === 0 ? "disabled" : ""}>▲</button>
+              <button class="reorder-btn" data-move="down" data-idx="${i}" ${i === state.days.length - 1 ? "disabled" : ""}>▼</button>
+            </div>
+          ` : ""}
+          <span class="day-select-num" data-nav="${d.id}">${i + 1}</span>
+          <span class="day-select-text" data-nav="${d.id}">
+            <span class="day-select-title">${escapeHtml(d.title)}</span>
+            ${d.date ? `<span class="day-select-date">${escapeHtml(d.date)}</span>` : ""}
+          </span>
+        </div>
+      `).join("")}
+    </div>
+    ${canEdit ? `<button class="secondary-btn full-width" id="sheet-add-day-btn" style="margin-top:10px;">＋ 新增天數</button>` : ""}
+  `);
+  document.querySelectorAll("#modal-box [data-nav]").forEach((el) => {
+    el.addEventListener("click", () => {
+      closeModal();
+      selectDay(el.dataset.nav);
+    });
+  });
+  document.querySelectorAll("#modal-box .reorder-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const idx = Number(btn.dataset.idx);
+      moveDay(idx, btn.dataset.move === "up" ? -1 : 1);
+    });
+  });
+  const addBtn = document.getElementById("sheet-add-day-btn");
+  if (addBtn) addBtn.addEventListener("click", () => { closeModal(); renderAddDayModal(); });
+  if (canEdit) {
+    enableDragReorder(document.querySelector("#modal-box .day-select-list"), ".day-select-item", reorderDaysByDrag);
+  }
+}
+
+function openConfirm(message, onConfirm) {
+  openModal("請確認", `
+    <p>${escapeHtml(message)}</p>
+    <div class="form-actions">
+      <button class="secondary-btn" id="confirm-cancel">取消</button>
+      <button class="danger-btn" id="confirm-ok">確定刪除</button>
+    </div>
+  `);
+  document.getElementById("confirm-cancel").onclick = closeModal;
+  document.getElementById("confirm-ok").onclick = async () => {
+    closeModal();
+    await onConfirm();
+  };
+}
+
+function renderAddDayModal() {
+  openModal("新增天數", `
+    <div class="form-row"><label>標題</label><input type="text" id="day-title" placeholder="例如：Day 1 抵達 &amp; 市區觀光"></div>
+    <div class="form-row"><label>日期（選填）</label><input type="date" id="day-date"></div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="day-cancel">取消</button>
+      <button class="primary-btn" id="day-confirm">新增</button>
+    </div>
+  `);
+  document.getElementById("day-cancel").onclick = closeModal;
+  document.getElementById("day-confirm").onclick = async () => {
+    const title = document.getElementById("day-title").value.trim();
+    const date = document.getElementById("day-date").value;
+    if (!title) return toast("請輸入標題");
+    closeModal();
+    const id = await createDay(title, date);
+    navigate(`#/trip/${state.tripId}/day/${id}`);
+  };
+}
+
+function renderEditDayMetaModal(day) {
+  openModal("編輯本日資訊", `
+    <div class="form-row"><label>標題</label><input type="text" id="day-title" value="${escapeHtml(day.title)}"></div>
+    <div class="form-row"><label>日期</label><input type="date" id="day-date" value="${escapeHtml(day.date || "")}"></div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="day-cancel">取消</button>
+      <button class="primary-btn" id="day-confirm">儲存</button>
+    </div>
+  `);
+  document.getElementById("day-cancel").onclick = closeModal;
+  document.getElementById("day-confirm").onclick = async () => {
+    const title = document.getElementById("day-title").value.trim();
+    const date = document.getElementById("day-date").value;
+    if (!title) return toast("請輸入標題");
+    await updateDayMeta(day.id, { title, date });
+    closeModal();
+  };
+}
+
+function renderAddSpotModal(dayId) {
+  openModal("新增時段／景點", `
+    <div class="form-row"><label>景點／活動名稱</label><input type="text" id="spot-title" placeholder="例如：淺草寺"></div>
+    <div class="form-row"><label>時間（選填）</label><input type="time" id="spot-time"></div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="spot-cancel">取消</button>
+      <button class="primary-btn" id="spot-confirm">新增</button>
+    </div>
+  `);
+  document.getElementById("spot-cancel").onclick = closeModal;
+  document.getElementById("spot-confirm").onclick = async () => {
+    const title = document.getElementById("spot-title").value.trim();
+    const time = document.getElementById("spot-time").value;
+    if (!title) return toast("請輸入名稱");
+    closeModal();
+    await createSpot(dayId, title, time);
+  };
+}
+
+
+// ------------------------------------------------------------
+// 內容區塊（文字 / 圖片 / 表格）— 母頁、子頁通用
+// ------------------------------------------------------------
+function renderBlockView(block) {
+  if (block.type === "text") {
+    return `<div class="block-text">${escapeHtml(block.content)}</div>`;
+  }
+  if (block.type === "image") {
+    return `<figure class="block-image"><img src="${escapeHtml(block.url)}" alt="${escapeHtml(block.caption || "")}" loading="lazy">${block.caption ? `<figcaption>${escapeHtml(block.caption)}</figcaption>` : ""}</figure>`;
+  }
+  if (block.type === "table") {
+    const rows = block.rows || [];
+    return `<div class="block-table"><table>${rows.map((row, ri) => `<tr>${row.map((c) => ri === 0 ? `<th>${escapeHtml(c)}</th>` : `<td>${escapeHtml(c)}</td>`).join("")}</tr>`).join("")}</table></div>`;
+  }
+  return "";
+}
+
+function renderContentBlocks(container, blocks, { editable, onChange }) {
+  const list = blocks || [];
+  container.innerHTML = `
+    <div id="blocks-render"></div>
+    ${editable ? `
+      <div class="block-editor-row">
+        <button class="secondary-btn small-btn" data-add="text">＋ 文字</button>
+        <button class="secondary-btn small-btn" data-add="image">＋ 圖片連結</button>
+        <button class="secondary-btn small-btn" data-add="table">＋ 表格</button>
+      </div>` : ""}
+  `;
+  const renderEl = container.querySelector("#blocks-render");
+  if (!list.length) {
+    renderEl.innerHTML = editable ? "" : `<div class="empty-hint" style="padding:10px 0;">尚無內容</div>`;
+  } else {
+    renderEl.innerHTML = list.map((b, i) => `
+      <div class="content-block" data-idx="${i}">
+        ${renderBlockView(b)}
+        ${editable ? `
+          <div class="block-controls">
+            <button class="secondary-btn small-btn" data-act="up" data-idx="${i}" ${i === 0 ? "disabled" : ""}>↑</button>
+            <button class="secondary-btn small-btn" data-act="down" data-idx="${i}" ${i === list.length - 1 ? "disabled" : ""}>↓</button>
+            <button class="secondary-btn small-btn" data-act="edit" data-idx="${i}">編輯</button>
+            <button class="danger-btn small-btn" data-act="del" data-idx="${i}">刪除</button>
+          </div>` : ""}
+      </div>
+    `).join("");
+  }
+
+  if (!editable) return;
+
+  container.querySelectorAll("[data-add]").forEach((btn) => {
+    btn.addEventListener("click", () => renderBlockEditModal(btn.dataset.add, null, (newBlock) => {
+      onChange([...(blocks || []), newBlock]);
+    }));
+  });
+  renderEl.querySelectorAll("[data-act]").forEach((btn) => {
+    const idx = Number(btn.dataset.idx);
+    btn.addEventListener("click", () => {
+      const arr = [...list];
+      if (btn.dataset.act === "up" && idx > 0) {
+        [arr[idx - 1], arr[idx]] = [arr[idx], arr[idx - 1]];
+        onChange(arr);
+      } else if (btn.dataset.act === "down" && idx < arr.length - 1) {
+        [arr[idx + 1], arr[idx]] = [arr[idx], arr[idx + 1]];
+        onChange(arr);
+      } else if (btn.dataset.act === "del") {
+        arr.splice(idx, 1);
+        onChange(arr);
+      } else if (btn.dataset.act === "edit") {
+        renderBlockEditModal(arr[idx].type, arr[idx], (updated) => {
+          arr[idx] = updated;
+          onChange(arr);
+        });
+      }
+    });
+  });
+}
+
+function renderBlockEditModal(type, existing, onSave) {
+  let bodyHtml = "";
+  if (type === "text") {
+    bodyHtml = `<div class="form-row"><textarea id="blk-text" placeholder="輸入文字說明...">${escapeHtml(existing?.content || "")}</textarea></div>`;
+  } else if (type === "image") {
+    bodyHtml = `
+      <div class="form-row"><label>圖片網址</label><input type="text" id="blk-url" placeholder="https://..." value="${escapeHtml(existing?.url || "")}"></div>
+      <div class="form-row"><label>圖片說明（選填）</label><input type="text" id="blk-caption" value="${escapeHtml(existing?.caption || "")}"></div>
+      ${existing?.url ? `<img src="${escapeHtml(existing.url)}" style="max-width:100%;border-radius:8px;margin-bottom:8px;">` : ""}
+    `;
+  } else if (type === "table") {
+    const rows = existing?.rows || [["欄位1", "欄位2"], ["", ""]];
+    bodyHtml = `
+      <div class="form-row">
+        <label>表格內容（第一列為標題列）</label>
+        <div id="table-editor"></div>
+        <div style="display:flex;gap:6px;margin-top:6px;">
+          <button class="secondary-btn small-btn" id="add-row-btn">＋ 新增列</button>
+          <button class="secondary-btn small-btn" id="add-col-btn">＋ 新增欄</button>
+        </div>
+      </div>
+    `;
+    // 用閉包保存 rows 供下方渲染使用
+    window.__tmpTableRows = rows.map((r) => [...r]);
+  }
+
+  openModal(existing ? "編輯區塊" : "新增區塊", `
+    ${bodyHtml}
+    <div class="form-actions">
+      <button class="secondary-btn" id="blk-cancel">取消</button>
+      <button class="primary-btn" id="blk-save">儲存</button>
+    </div>
+  `);
+
+  if (type === "table") {
+    const renderTableEditor = () => {
+      const rows = window.__tmpTableRows;
+      const editorEl = document.getElementById("table-editor");
+      editorEl.innerHTML = `<table style="border-collapse:collapse;width:100%;">${rows.map((row, ri) => `
+        <tr>${row.map((cell, ci) => `<td style="border:1px solid var(--border);padding:2px;"><input type="text" data-r="${ri}" data-c="${ci}" value="${escapeHtml(cell)}" style="width:100%;border:none;padding:6px;font-size:13px;"></td>`).join("")}
+        <td><button class="icon-btn del-row-btn" data-r="${ri}" style="font-size:13px;">✕</button></td></tr>
+      `).join("")}</table>`;
+      editorEl.querySelectorAll("input").forEach((inp) => {
+        inp.addEventListener("input", () => {
+          rows[Number(inp.dataset.r)][Number(inp.dataset.c)] = inp.value;
+        });
+      });
+      editorEl.querySelectorAll(".del-row-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          if (rows.length <= 1) return;
+          rows.splice(Number(btn.dataset.r), 1);
+          renderTableEditor();
+        });
+      });
+    };
+    renderTableEditor();
+    document.getElementById("add-row-btn").addEventListener("click", () => {
+      const cols = window.__tmpTableRows[0]?.length || 2;
+      window.__tmpTableRows.push(new Array(cols).fill(""));
+      renderTableEditor();
+    });
+    document.getElementById("add-col-btn").addEventListener("click", () => {
+      window.__tmpTableRows.forEach((r) => r.push(""));
+      renderTableEditor();
+    });
+  }
+
+  document.getElementById("blk-cancel").onclick = closeModal;
+  document.getElementById("blk-save").onclick = () => {
+    let block;
+    if (type === "text") {
+      const content = document.getElementById("blk-text").value.trim();
+      if (!content) return toast("請輸入文字內容");
+      block = { type: "text", content };
+    } else if (type === "image") {
+      const url = document.getElementById("blk-url").value.trim();
+      const caption = document.getElementById("blk-caption").value.trim();
+      if (!url) return toast("請輸入圖片網址");
+      block = { type: "image", url, caption };
+    } else if (type === "table") {
+      block = { type: "table", rows: window.__tmpTableRows.map((r) => [...r]) };
+      delete window.__tmpTableRows;
+    }
+    closeModal();
+    onSave(block);
+  };
+}
+
+
+// ------------------------------------------------------------
+// 景點詳細頁（含許願池）
+// ------------------------------------------------------------
+function renderSpotPage() {
+  if (!state.currentSpot) return;
+  const root = document.getElementById("spot-panel-content");
+  const day = state.days.find((d) => d.id === state.currentDayId) || { title: "" };
+  const spot = state.currentSpot;
+  const canEdit = canEditItinerary();
+
+  document.getElementById("spot-panel-header-title").textContent = spot.title;
+
+  root.innerHTML = `
+    <div class="breadcrumb">${escapeHtml(day.title)} › ${escapeHtml(spot.title)}</div>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <div style="font-weight:700;font-size:17px;">${escapeHtml(spot.title)}</div>
+          ${spot.time ? `<div style="color:var(--text-muted);font-size:13px;margin-top:2px;">🕒 ${escapeHtml(spot.time)}</div>` : ""}
+        </div>
+        ${canEdit ? `
+          <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
+            <button class="secondary-btn small-btn" id="edit-spot-meta-btn">編輯</button>
+            <button class="secondary-btn small-btn" id="copy-spot-meta-btn">📋 複製</button>
+            <button class="secondary-btn small-btn" id="move-spot-meta-btn">🚚 搬移</button>
+            <button class="danger-btn small-btn" id="delete-spot-btn">刪除</button>
+          </div>` : ""}
+      </div>
+      ${(() => {
+        const href = resolveMapHref(spot.mapUrl, null, spot.title);
+        return href ? `<a class="secondary-btn small-btn" href="${escapeHtml(href)}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:4px;margin-top:10px;text-decoration:none;">📍 在 Google 地圖上查看</a>` : "";
+      })()}
+      <div id="spot-blocks" style="margin-top:12px;"></div>
+    </div>
+
+    <div class="section-title">💭 許願池</div>
+    <div class="card">
+      <p style="color:var(--text-muted);font-size:13px;margin-top:0;">大家都可以在這裡留言，寫下想去的地方、想吃的東西，也可以貼圖片連結分享照片（不限權限）</p>
+      <div class="form-row" style="display:flex;flex-direction:column;gap:6px;">
+        <div style="display:flex;gap:8px;">
+          <input type="text" id="wish-input" placeholder="想去...想吃..." style="flex:1;">
+          <button class="secondary-btn small-btn" id="wish-img-toggle" title="附上圖片連結">🖼️</button>
+          <button class="secondary-btn small-btn" id="wish-map-toggle" title="附上地標">📍 地標</button>
+          <button class="primary-btn" id="wish-submit">送出</button>
+        </div>
+        <input type="text" id="wish-image-input" placeholder="圖片網址（選填，貼上圖片連結）" style="display:none;">
+        <div id="wish-map-fields" style="display:none;flex-direction:column;gap:6px;">
+          <input type="text" id="wish-map-link-input" placeholder="Google 地圖連結（例如 https://maps.app.goo.gl/3yRm2VmBV6d4LFRN8）">
+          <input type="text" id="wish-map-address-input" placeholder="地址／地點（沒填連結的話，會用這個關鍵字搜尋）">
+        </div>
+      </div>
+      <div id="wish-list"></div>
+    </div>
+  `;
+
+  renderContentBlocks(document.getElementById("spot-blocks"), spot.blocks || [], {
+    editable: canEdit,
+    onChange: (blocks) => updateSpotBlocks(day.id, spot.id, blocks),
+  });
+
+  if (canEdit) {
+    document.getElementById("edit-spot-meta-btn").addEventListener("click", () => renderEditSpotMetaModal(day.id, spot));
+    document.getElementById("copy-spot-meta-btn").addEventListener("click", () => renderSpotDayPickerModal(day.id, spot, "copy"));
+    document.getElementById("move-spot-meta-btn").addEventListener("click", () => renderSpotDayPickerModal(day.id, spot, "move"));
+    document.getElementById("delete-spot-btn").addEventListener("click", () => {
+      openConfirm(`確定要刪除「${spot.title}」嗎？`, async () => {
+        await deleteSpot(day.id, spot.id);
+        closeSpotPanel();
+        toast("已刪除");
+      });
+    });
+  }
+
+  const wishListEl = document.getElementById("wish-list");
+  if (!state.wishes.length) {
+    wishListEl.innerHTML = `<div class="empty-hint">還沒有人許願，第一個留言看看吧！</div>`;
+  } else {
+    const my = myMember();
+    wishListEl.innerHTML = state.wishes.map((w) => {
+      const mapHref = resolveMapHref(w.mapUrl, w.mapAddress, null);
+      return `
+      <div class="wish-item" data-wishid="${w.id}">
+        <div class="wish-author">${escapeHtml(w.authorName)}</div>
+        ${w.text ? `<div class="wish-text">${escapeHtml(w.text)}</div>` : ""}
+        ${w.imageUrl ? `<div class="wish-image"><img src="${escapeHtml(w.imageUrl)}" alt="" loading="lazy"></div>` : ""}
+        ${mapHref ? `<div class="wish-image"><a href="${escapeHtml(mapHref)}" target="_blank" rel="noopener" style="color:var(--accent);font-size:13px;text-decoration:none;">📍 在 Google 地圖上查看</a></div>` : ""}
+        <div class="wish-time">${fmtDateTime(w.createdAt)}
+          ${(my && (w.authorId === my.id || isOwner())) ? `<span class="edit-wish-btn" data-wishid="${w.id}" style="color:var(--accent);cursor:pointer;margin-left:8px;">編輯</span><span class="del-wish-btn" data-wishid="${w.id}" style="color:var(--danger);cursor:pointer;margin-left:8px;">刪除</span>` : ""}
+        </div>
+      </div>
+    `;
+    }).join("");
+    wishListEl.querySelectorAll(".del-wish-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        openConfirm("確定要刪除這則留言嗎？", async () => {
+          await deleteWish(day.id, spot.id, btn.dataset.wishid);
+        });
+      });
+    });
+    wishListEl.querySelectorAll(".edit-wish-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const wish = state.wishes.find((w) => w.id === btn.dataset.wishid);
+        if (wish) renderEditWishModal(day.id, spot.id, wish);
+      });
+    });
+  }
+
+  document.getElementById("wish-img-toggle").addEventListener("click", () => {
+    const el = document.getElementById("wish-image-input");
+    const showing = el.style.display !== "none";
+    el.style.display = showing ? "none" : "block";
+    if (!showing) el.focus();
+  });
+
+  document.getElementById("wish-map-toggle").addEventListener("click", () => {
+    const el = document.getElementById("wish-map-fields");
+    const showing = el.style.display !== "none";
+    el.style.display = showing ? "none" : "flex";
+    if (!showing) document.getElementById("wish-map-link-input").focus();
+  });
+
+  const submitWish = async () => {
+    const input = document.getElementById("wish-input");
+    const imgInput = document.getElementById("wish-image-input");
+    const mapLinkInput = document.getElementById("wish-map-link-input");
+    const mapAddressInput = document.getElementById("wish-map-address-input");
+    const text = input.value.trim();
+    const imageUrl = imgInput.value.trim();
+    const mapUrl = mapLinkInput.value.trim();
+    const mapAddress = mapAddressInput.value.trim();
+    if (!text && !imageUrl) return;
+    input.value = "";
+    imgInput.value = "";
+    imgInput.style.display = "none";
+    mapLinkInput.value = "";
+    mapAddressInput.value = "";
+    document.getElementById("wish-map-fields").style.display = "none";
+    await addWish(day.id, spot.id, text, imageUrl, mapUrl, mapAddress);
+  };
+  document.getElementById("wish-submit").addEventListener("click", submitWish);
+  document.getElementById("wish-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submitWish();
+  });
+  document.getElementById("wish-image-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submitWish();
+  });
+  document.getElementById("wish-map-link-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submitWish();
+  });
+  document.getElementById("wish-map-address-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submitWish();
+  });
+}
+
+function renderEditWishModal(dayId, spotId, wish) {
+  openModal("編輯留言", `
+    <div class="form-row"><label>內容</label><textarea id="wish-edit-text" rows="3" placeholder="想去...想吃...">${escapeHtml(wish.text || "")}</textarea></div>
+    <div class="form-row"><label>圖片網址（選填）</label><input type="text" id="wish-edit-image" value="${escapeHtml(wish.imageUrl || "")}" placeholder="https://..."></div>
+    <div class="form-row"><label>Google 地圖連結（選填）</label><input type="text" id="wish-edit-map-link" value="${escapeHtml(wish.mapUrl || "")}" placeholder="例如 https://maps.app.goo.gl/3yRm2VmBV6d4LFRN8"></div>
+    <div class="form-row"><label>地址／地點（選填，沒填連結時會用這個搜尋）</label><input type="text" id="wish-edit-map-address" value="${escapeHtml(wish.mapAddress || "")}" placeholder="例如：淺草寺"></div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="wish-edit-cancel">取消</button>
+      <button class="primary-btn" id="wish-edit-save">儲存</button>
+    </div>
+  `);
+  document.getElementById("wish-edit-cancel").onclick = closeModal;
+  document.getElementById("wish-edit-save").onclick = async () => {
+    const text = document.getElementById("wish-edit-text").value.trim();
+    const imageUrl = document.getElementById("wish-edit-image").value.trim();
+    const mapUrl = document.getElementById("wish-edit-map-link").value.trim();
+    const mapAddress = document.getElementById("wish-edit-map-address").value.trim();
+    if (!text && !imageUrl) return toast("內容和圖片網址不能都空白");
+    closeModal();
+    await updateWish(dayId, spotId, wish.id, { text, imageUrl: imageUrl || null, mapUrl: mapUrl || null, mapAddress: mapAddress || null });
+  };
+}
+
+function renderSpotDayPickerModal(sourceDayId, spot, mode) {
+  const isMove = mode === "move";
+  const otherDays = state.days.filter((d) => d.id !== sourceDayId);
+  const sameDay = state.days.find((d) => d.id === sourceDayId);
+  const dayRow = (d) => `
+    <div class="card spot-item" data-pick-dayid="${d.id}" style="cursor:pointer;">
+      <div class="spot-title" style="flex:1;">${escapeHtml(d.title)}${d.date ? `<span style="color:var(--text-muted);font-weight:400;font-size:12.5px;"> ・ ${escapeHtml(d.date)}</span>` : ""}</div>
+      <div>›</div>
+    </div>`;
+  openModal(`${isMove ? "搬移" : "複製"}「${escapeHtml(spot.title)}」到...`, `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">
+      ${isMove
+        ? "選一個天數，會把這個景點（含內容、地圖設定與許願池留言）搬過去，原本天數底下就不會再有這個景點。"
+        : "選一個天數，會把這個景點（含內容與地圖設定）複製過去，原本的不會受影響；許願池留言不會一起複製。"}
+    </p>
+    <div style="display:flex;flex-direction:column;gap:8px;max-height:50vh;overflow-y:auto;">
+      ${otherDays.length ? otherDays.map(dayRow).join("") : `<div class="empty-hint">目前沒有其他天數可以${isMove ? "搬" : "複製"}過去</div>`}
+      ${(!isMove && sameDay) ? `<div style="border-top:1px solid var(--border);margin-top:4px;padding-top:8px;">${dayRow(sameDay)}<div style="font-size:12px;color:var(--text-muted);margin-top:-4px;">↑ 複製一份到同一天（例如同一個地方要去兩次）</div></div>` : ""}
+    </div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="spot-daypicker-cancel">取消</button>
+    </div>
+  `);
+  document.getElementById("spot-daypicker-cancel").onclick = closeModal;
+  document.querySelectorAll("[data-pick-dayid]").forEach((el) => {
+    el.addEventListener("click", async () => {
+      const targetDayId = el.dataset.pickDayid;
+      const targetDay = state.days.find((d) => d.id === targetDayId);
+      closeModal();
+      if (isMove) {
+        await moveSpotToDay(sourceDayId, spot, targetDayId);
+        closeSpotPanel();
+        toast(`已搬移到「${targetDay ? targetDay.title : ""}」`);
+      } else {
+        await copySpotToDay(spot, targetDayId);
+        toast(`已複製到「${targetDay ? targetDay.title : ""}」`);
+      }
+    });
+  });
+}
+
+function renderEditSpotMetaModal(dayId, spot) {
+  openModal("編輯景點資訊", `
+    <div class="form-row"><label>名稱</label><input type="text" id="spot-title" value="${escapeHtml(spot.title)}"></div>
+    <div class="form-row"><label>時間</label><input type="time" id="spot-time" value="${escapeHtml(spot.time || "")}"></div>
+    <div class="form-row">
+      <label>Google 地圖連結（選填）</label>
+      <input type="text" id="spot-mapurl" value="${escapeHtml(spot.mapUrl || "")}" placeholder="例如 https://maps.app.goo.gl/3yRm2VmBV6d4LFRN8">
+    </div>
+    <p style="font-size:12px;color:var(--text-muted);margin:-6px 0 12px;">沒填的話，會用上面的「名稱」欄位到 Google 地圖搜尋</p>
+    <div class="form-actions">
+      <button class="secondary-btn" id="spot-cancel">取消</button>
+      <button class="primary-btn" id="spot-confirm">儲存</button>
+    </div>
+  `);
+  document.getElementById("spot-cancel").onclick = closeModal;
+  document.getElementById("spot-confirm").onclick = async () => {
+    const title = document.getElementById("spot-title").value.trim();
+    const time = document.getElementById("spot-time").value;
+    const mapUrl = document.getElementById("spot-mapurl").value.trim();
+    if (!title) return toast("請輸入名稱");
+    await updateSpotMeta(dayId, spot.id, { title, time, mapUrl: mapUrl || null });
+    closeModal();
+  };
+}
+
+
+// ------------------------------------------------------------
+// 記帳與分帳結算邏輯（內部一律用「分」為單位計算，避免浮點誤差）
+// ------------------------------------------------------------
+// 先按幣別分開算「每個人在這個幣別裡是多收還是多付」，完全不牽涉匯率
+function computeBalancesByCurrency(expenses, members) {
+  const byCurrency = {};
+  expenses.forEach((e) => {
+    const currency = e.currency || "TWD";
+    const balance = (byCurrency[currency] = byCurrency[currency] || {});
+    members.forEach((m) => { if (!(m.id in balance)) balance[m.id] = 0; });
+    if (!(e.payerId in balance)) balance[e.payerId] = 0;
+    balance[e.payerId] += e.amountCents;
+    const share = e.amountCents / e.splitWith.length;
+    e.splitWith.forEach((mid) => {
+      if (!(mid in balance)) balance[mid] = 0;
+      balance[mid] -= share;
+    });
+  });
+  return byCurrency;
+}
+
+// 把每個幣別的餘額，用（存在行程資料裡的）匯率換算成台幣後加總，
+// 缺匯率的幣別會列在 missingCurrencies，該幣別金額暫不計入 balanceTWD
+function computeSettlement(expenses, members, fxRates) {
+  const byCurrency = computeBalancesByCurrency(expenses, members);
+  const balanceTWD = {};
+  members.forEach((m) => (balanceTWD[m.id] = 0));
+  const missingCurrencies = [];
+
+  Object.entries(byCurrency).forEach(([currency, balance]) => {
+    const rate = currency === "TWD" ? 1 : fxRates[currency]?.rate;
+    if (!rate) {
+      missingCurrencies.push(currency);
+      return;
+    }
+    Object.entries(balance).forEach(([id, amt]) => {
+      if (!(id in balanceTWD)) balanceTWD[id] = 0;
+      balanceTWD[id] += amt * rate;
+    });
+  });
+
+  const creditors = [];
+  const debtors = [];
+  Object.entries(balanceTWD).forEach(([id, amt]) => {
+    const rounded = Math.round(amt);
+    if (rounded > 0) creditors.push({ id, amt: rounded });
+    else if (rounded < 0) debtors.push({ id, amt: -rounded });
+  });
+  creditors.sort((a, b) => b.amt - a.amt);
+  debtors.sort((a, b) => b.amt - a.amt);
+
+  const transactions = [];
+  let ci = 0, di = 0;
+  while (ci < creditors.length && di < debtors.length) {
+    const c = creditors[ci];
+    const d = debtors[di];
+    const amt = Math.min(c.amt, d.amt);
+    if (amt > 0) transactions.push({ from: d.id, to: c.id, amountCents: amt });
+    c.amt -= amt;
+    d.amt -= amt;
+    if (c.amt === 0) ci++;
+    if (d.amt === 0) di++;
+  }
+  return { balanceTWD, transactions, missingCurrencies, byCurrency };
+}
+
+function memberName(id) {
+  const m = state.trip.members.find((x) => x.id === id);
+  return m ? m.name : "（已移除的成員）";
+}
+
+function renderExpensesPage() {
+  const root = document.getElementById("app-root");
+  const members = state.trip.members;
+  const fxRates = tripFxRates();
+
+  // 用到的外幣（有消費紀錄的），排除台幣
+  const usedCurrencies = Array.from(new Set(state.expenses.map((e) => e.currency || "TWD"))).filter((c) => c !== "TWD");
+
+  // 依日期分組
+  const byDate = {};
+  state.expenses.forEach((e) => {
+    const key = e.date || "未指定日期";
+    (byDate[key] = byDate[key] || []).push(e);
+  });
+  const dateKeys = Object.keys(byDate).sort();
+
+  const { balanceTWD, transactions, missingCurrencies } = computeSettlement(state.expenses, members, fxRates);
+
+  root.innerHTML = `
+    <div class="tabs">
+      <button class="tab-btn" id="tab-itinerary">📅 行程</button>
+      <button class="tab-btn active" id="tab-expenses">💰 記帳與分帳</button>
+    </div>
+
+    ${usedCurrencies.length ? `
+      <div class="fx-status-card">
+        <div class="fx-status-title">目前使用的幣別匯率</div>
+        ${usedCurrencies.map((c) => {
+          const info = fxRates[c];
+          return `<div class="fx-status-row">
+            <span>1 ${escapeHtml(c)} ≈</span>
+            <span>
+              ${info ? `${info.rate.toFixed(4)} TWD${info.manual ? "（手動）" : "（網路）"}　<span class="fx-updated">${escapeHtml(info.updatedAt)}</span>` : `<span class="fx-missing">尚未取得</span>`}
+              <button class="secondary-btn small-btn fx-set-btn" data-currency="${escapeHtml(c)}" style="margin-left:8px;">設定</button>
+            </span>
+          </div>`;
+        }).join("")}
+        <button class="secondary-btn small-btn" id="refresh-fx-btn" style="margin-top:8px;">🔄 一次查詢全部（網路）</button>
+      </div>
+    ` : ""}
+
+    ${missingCurrencies.length ? `
+      <div class="readonly-banner">⚠️ ${missingCurrencies.map(escapeHtml).join("、")} 還沒有匯率資料，下面的結算金額暫時還沒把這些幣別的消費算進去。可以按上面「設定」用網路查詢或手動輸入。</div>
+    ` : ""}
+
+    <div class="section-title">結算總覽</div>
+    <div class="card">
+      ${members.map((m) => `
+        <div class="balance-row">
+          <span>${escapeHtml(m.name)}</span>
+          <span style="color:${balanceTWD[m.id] >= 0 ? "#16a34a" : "var(--danger)"};font-weight:600;">
+            ${balanceTWD[m.id] > 50 ? `應收 NT$${fmtMoney(balanceTWD[m.id])}` : balanceTWD[m.id] < -50 ? `應付 NT$${fmtMoney(Math.abs(balanceTWD[m.id]))}` : "已結清"}
+          </span>
+        </div>
+      `).join("")}
+      <button class="primary-btn full-width" id="open-settlement-btn" style="margin-top:12px;">🧮 結算（查看建議轉帳方式）</button>
+    </div>
+
+    <div class="section-title">消費明細</div>
+    ${canViewContent() ? `<button class="primary-btn full-width" id="add-expense-btn" style="margin-bottom:12px;">＋ 新增一筆消費</button>` : ""}
+    <div id="expense-list">
+      ${dateKeys.length ? dateKeys.map((dk) => {
+        const items = byDate[dk];
+        // 依幣別分別列小計（不同幣別不會混加）
+        const subtotalByCurrency = {};
+        items.forEach((e) => {
+          const c = e.currency || "TWD";
+          subtotalByCurrency[c] = (subtotalByCurrency[c] || 0) + e.amountCents;
+        });
+        const subtotalText = Object.entries(subtotalByCurrency)
+          .map(([c, cents]) => fmtCurrencyAmt(cents, c))
+          .join("　");
+        return `
+          <div style="margin-bottom:16px;">
+            <div style="display:flex;justify-content:space-between;font-size:13px;color:var(--text-muted);margin-bottom:6px;">
+              <span>${escapeHtml(dk)}</span><span>小計 ${subtotalText}</span>
+            </div>
+            ${items.map((e) => {
+              const currency = e.currency || "TWD";
+              const isForeign = currency !== "TWD";
+              const rateInfo = fxRates[currency];
+              return `
+              <div class="expense-item" data-id="${e.id}">
+                <div class="expense-top">
+                  <span>${escapeHtml(e.title)} ${isForeign ? `<span class="currency-tag">${escapeHtml(currency)}</span>` : ""}</span>
+                  <span class="expense-amount">${fmtCurrencyAmt(e.amountCents, currency)}</span>
+                </div>
+                ${isForeign ? (rateInfo
+                  ? `<div class="expense-fx">≈ NT$${fmtMoney(Math.round(e.amountCents * rateInfo.rate))}（依 ${escapeHtml(rateInfo.updatedAt)} 匯率）</div>`
+                  : `<div class="expense-fx expense-fx-missing">尚未取得 ${escapeHtml(currency)} 匯率，還沒換算成台幣</div>`
+                ) : ""}
+                <div class="expense-meta">
+                  ${escapeHtml(memberName(e.payerId))} 先付款，由 ${e.splitWith.map(memberName).map(escapeHtml).join("、")} 分攤
+                  ${e.note ? ` · ${escapeHtml(e.note)}` : ""}
+                </div>
+                ${canManageExpense(e) ? `<div style="margin-top:6px;display:flex;gap:6px;">
+                  <span class="secondary-btn small-btn edit-expense-btn" data-id="${e.id}">編輯</span>
+                  <span class="danger-btn small-btn del-expense-btn" data-id="${e.id}">刪除</span>
+                </div>` : ""}
+              </div>
+            `;
+            }).join("")}
+          </div>
+        `;
+      }).join("") : `<div class="empty-hint">還沒有任何消費紀錄</div>`}
+    </div>
+  `;
+
+  document.getElementById("tab-itinerary").onclick = () => navigate(`#/trip/${state.tripId}${state.currentDayId ? "/day/" + state.currentDayId : ""}`);
+  document.getElementById("tab-expenses").onclick = () => {};
+  const addExpenseBtn = document.getElementById("add-expense-btn");
+  if (addExpenseBtn) addExpenseBtn.addEventListener("click", () => renderExpenseFormModal(null));
+  document.getElementById("open-settlement-btn").addEventListener("click", () => renderSettlementModal(transactions));
+  const refreshBtn = document.getElementById("refresh-fx-btn");
+  if (refreshBtn) refreshBtn.addEventListener("click", () => handleRefreshRates(usedCurrencies));
+  root.querySelectorAll(".fx-set-btn").forEach((btn) => {
+    btn.addEventListener("click", () => renderFxRateSettingModal(btn.dataset.currency));
+  });
+  root.querySelectorAll(".edit-expense-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const expense = state.expenses.find((e) => e.id === btn.dataset.id);
+      if (expense && canManageExpense(expense)) renderExpenseFormModal(expense);
+    });
+  });
+  root.querySelectorAll(".del-expense-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const expense = state.expenses.find((e) => e.id === btn.dataset.id);
+      if (!expense || !canManageExpense(expense)) return toast("你只能管理自己新增的明細");
+      openConfirm("確定要刪除這筆消費紀錄嗎？", async () => {
+        await deleteExpense(btn.dataset.id);
+      });
+    });
+  });
+}
+
+function renderSettlementModal(transactions) {
+  openModal("結算：建議轉帳方式", `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">已自動精簡成最少的轉帳筆數。</p>
+    ${transactions.length ? transactions.map((t) => `
+      <div class="balance-row">
+        <span>${escapeHtml(memberName(t.from))} <span class="settle-arrow">→</span> ${escapeHtml(memberName(t.to))}</span>
+        <span style="font-weight:700;">NT$${fmtMoney(t.amountCents)}</span>
+      </div>
+    `).join("") : `<div class="empty-hint">目前帳務已結清 🎉</div>`}
+    <div class="form-actions">
+      <button class="primary-btn" id="settlement-close-btn">關閉</button>
+    </div>
+  `);
+  document.getElementById("settlement-close-btn").onclick = closeModal;
+}
+
+function renderFxRateSettingModal(currency) {
+  const info = tripFxRates()[currency];
+  openModal(`設定 ${escapeHtml(currency)} 匯率`, `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">
+      目前：${info ? `1 ${escapeHtml(currency)} ≈ ${info.rate.toFixed(4)} TWD（${info.manual ? "手動輸入" : "網路查詢"}，${escapeHtml(info.updatedAt)} 更新）` : "尚未設定"}
+    </p>
+    <button class="secondary-btn full-width" id="fx-auto-btn">🔄 使用網路即時匯率</button>
+    <div style="margin:18px 0;border-top:1px dashed var(--border);"></div>
+    <div class="form-row">
+      <label>或手動輸入：1 ${escapeHtml(currency)} = 多少台幣？</label>
+      <input type="number" min="0" step="0.0001" id="fx-manual-input" placeholder="例如：0.21">
+    </div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="fx-cancel-btn">取消</button>
+      <button class="primary-btn" id="fx-manual-save-btn">儲存手動匯率</button>
+    </div>
+  `);
+  document.getElementById("fx-cancel-btn").onclick = closeModal;
+  document.getElementById("fx-auto-btn").onclick = async () => {
+    const btn = document.getElementById("fx-auto-btn");
+    btn.disabled = true;
+    btn.textContent = "查詢中...";
+    const ok = await refreshFxRate(currency);
+    if (ok) {
+      closeModal();
+      toast("已更新為網路查詢的匯率");
+    } else {
+      btn.disabled = false;
+      btn.textContent = "🔄 使用網路即時匯率";
+      toast("查詢失敗，請改用下方手動輸入");
+    }
+  };
+  document.getElementById("fx-manual-save-btn").onclick = async () => {
+    const val = parseFloat(document.getElementById("fx-manual-input").value);
+    if (!(val > 0)) return toast("請輸入正確的匯率數字");
+    await saveTripFxRate(currency, val, true);
+    closeModal();
+    toast("已儲存手動匯率");
+  };
+}
+
+async function handleRefreshRates(currencies) {
+  const btn = document.getElementById("refresh-fx-btn");
+  if (btn) { btn.disabled = true; btn.textContent = "查詢中..."; }
+  const failed = [];
+  for (const c of currencies) {
+    const ok = await refreshFxRate(c);
+    if (!ok) failed.push(c);
+  }
+  if (btn) { btn.disabled = false; btn.textContent = "🔄 查詢／更新匯率"; }
+  if (failed.length) {
+    renderManualFxModal(failed);
+  } else {
+    toast("匯率已更新");
+  }
+}
+
+function renderManualFxModal(currencies) {
+  openModal("手動輸入匯率", `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">自動查詢暫時查不到以下幣別的匯率（常見原因：今天的資料還沒公布），可以先手動輸入，之後隨時可以再按「查詢／更新匯率」重新自動抓取。</p>
+    ${currencies.map((c) => `
+      <div class="form-row">
+        <label>1 ${escapeHtml(c)} = 多少台幣？</label>
+        <input type="number" min="0" step="0.0001" id="manual-fx-${escapeHtml(c)}" placeholder="例如：0.21">
+      </div>
+    `).join("")}
+    <div class="form-actions">
+      <button class="secondary-btn" id="manual-fx-cancel">取消</button>
+      <button class="primary-btn" id="manual-fx-save">儲存</button>
+    </div>
+  `);
+  document.getElementById("manual-fx-cancel").onclick = closeModal;
+  document.getElementById("manual-fx-save").onclick = async () => {
+    for (const c of currencies) {
+      const val = parseFloat(document.getElementById(`manual-fx-${c}`).value);
+      if (val > 0) await saveTripFxRate(c, val, true);
+    }
+    closeModal();
+    toast("已儲存手動匯率");
+  };
+}
+
+function renderExpenseFormModal(existing) {
+  if (existing && !canManageExpense(existing)) {
+    toast("你只能管理自己新增的明細");
+    return;
+  }
+  const members = state.trip.members;
+  const my = myMember();
+  const currencies = tripCurrencies();
+  const multiCurrency = currencies.length > 1;
+  const isEdit = !!existing;
+  let splitWith = existing ? [...existing.splitWith] : members.map((m) => m.id); // 預設全員分攤
+
+  openModal(isEdit ? "編輯消費" : "新增消費", `
+    <div class="form-row"><label>項目名稱</label><input type="text" id="exp-title" placeholder="例如：午餐" value="${isEdit ? escapeHtml(existing.title) : ""}"></div>
+    <div class="form-row" style="display:flex;gap:8px;">
+      <div style="flex:1;">
+        <label>金額</label>
+        <input type="number" id="exp-amount" min="0" step="1" placeholder="0" value="${isEdit ? Math.round(existing.amountCents) / 100 : ""}">
+      </div>
+      ${multiCurrency ? `
+        <div style="width:120px;">
+          <label>幣別</label>
+          <select id="exp-currency">
+            ${currencies.map((c) => `<option value="${c}" ${(isEdit ? existing.currency : "TWD") === c ? "selected" : ""}>${escapeHtml(c)}</option>`).join("")}
+          </select>
+        </div>
+      ` : `<input type="hidden" id="exp-currency" value="TWD">`}
+    </div>
+    ${multiCurrency ? `<p style="font-size:12px;color:var(--text-muted);margin-top:-6px;">選外幣的話，不用擔心匯率——先記下來，結算時會統一換算成台幣。</p>` : ""}
+    <div class="form-row">
+      <label>由誰先付款</label>
+      <select id="exp-payer">
+        ${members.map((m) => `<option value="${m.id}" ${(isEdit ? existing.payerId === m.id : my && m.id === my.id) ? "selected" : ""}>${escapeHtml(m.name)}</option>`).join("")}
+      </select>
+    </div>
+    <div class="form-row">
+      <label>要跟誰分攤（可複選）</label>
+      <div class="checkbox-group" id="split-group">
+        ${members.map((m) => `<div class="checkbox-chip ${splitWith.includes(m.id) ? "checked" : ""}" data-id="${m.id}">${escapeHtml(m.name)}</div>`).join("")}
+      </div>
+    </div>
+    <div class="form-row"><label>日期</label><input type="date" id="exp-date" value="${isEdit ? escapeHtml(existing.date) : todayStr()}"></div>
+    <div class="form-row"><label>備註（選填）</label><input type="text" id="exp-note" value="${isEdit ? escapeHtml(existing.note || "") : ""}"></div>
+    <div class="form-actions">
+      ${isEdit ? `<button class="danger-btn" id="exp-delete" style="margin-right:auto;">刪除</button>` : ""}
+      <button class="secondary-btn" id="exp-cancel">取消</button>
+      <button class="primary-btn" id="exp-confirm">${isEdit ? "儲存" : "新增"}</button>
+    </div>
+  `);
+
+  document.querySelectorAll("#split-group .checkbox-chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      const id = chip.dataset.id;
+      if (splitWith.includes(id)) {
+        if (splitWith.length === 1) return toast("至少要有一人分攤");
+        splitWith = splitWith.filter((x) => x !== id);
+        chip.classList.remove("checked");
+      } else {
+        splitWith.push(id);
+        chip.classList.add("checked");
+      }
+    });
+  });
+
+  document.getElementById("exp-cancel").onclick = closeModal;
+  if (isEdit) {
+    document.getElementById("exp-delete").onclick = () => {
+      openConfirm("確定要刪除這筆消費紀錄嗎？", async () => {
+        closeModal();
+        await deleteExpense(existing.id);
+      });
+    };
+  }
+  document.getElementById("exp-confirm").onclick = async () => {
+    const title = document.getElementById("exp-title").value.trim();
+    const amount = parseFloat(document.getElementById("exp-amount").value);
+    const currency = document.getElementById("exp-currency").value;
+    const payerId = document.getElementById("exp-payer").value;
+    const date = document.getElementById("exp-date").value;
+    const note = document.getElementById("exp-note").value.trim();
+    if (!title) return toast("請輸入項目名稱");
+    if (!amount || amount <= 0) return toast("請輸入正確金額");
+    if (!splitWith.length) return toast("請至少選擇一位分攤者");
+
+    const amountCents = Math.round(amount * 100);
+    closeModal();
+
+    if (isEdit) {
+      await updateExpense(existing.id, { title, amountCents, currency, payerId, splitWith, date, note });
+    } else {
+      await addExpense({ title, amountCents, currency, payerId, splitWith, date, note });
+    }
+
+    // 如果是這趟行程第一次用到這個幣別，順手先查一次匯率（失敗也沒關係，結算頁隨時可以再查／手動輸入）
+    if (currency !== "TWD" && !tripFxRates()[currency]) {
+      refreshFxRate(currency);
+    }
+  };
+}
+
+
+// ------------------------------------------------------------
+// 貨幣設定（僅統籌人 owner 可操作）
+// ------------------------------------------------------------
+// ------------------------------------------------------------
+// 背景圖片設定（僅統籌人 owner 可操作；存在行程資料裡，大家看到的都一樣）
+// ------------------------------------------------------------
+function renderBackgroundSettingsModal() {
+  const currentUrl = state.trip.backgroundImageUrl || "";
+  const currentDim = state.trip.backgroundDim ?? 30;
+
+  openModal("背景圖片設定", `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">
+      設定整個行程頁面的背景圖片，貼上圖片網址即可（跟景點插圖一樣是用連結，不是上傳檔案）。這是存在行程資料裡的，所以同行的每個人打開這個行程都會看到同一張背景。
+    </p>
+    <div class="form-row">
+      <label>圖片網址</label>
+      <input type="text" id="bg-url-input" placeholder="https://..." value="${escapeHtml(currentUrl)}">
+    </div>
+    <div class="form-row">
+      <label>背景暗化程度（讓文字更好讀）</label>
+      <input type="range" id="bg-dim-input" min="0" max="80" step="5" value="${currentDim}" style="width:100%;">
+    </div>
+    <div id="bg-preview" style="height:120px;border-radius:var(--radius-sm);border:1px solid var(--border);background-size:cover;background-position:center;margin-bottom:6px;"></div>
+    <div class="form-actions">
+      <button class="danger-btn" id="bg-clear-btn">清除背景</button>
+      <button class="secondary-btn" id="bg-cancel-btn">取消</button>
+      <button class="primary-btn" id="bg-save-btn">儲存</button>
+    </div>
+  `);
+
+  const preview = document.getElementById("bg-preview");
+  const urlInput = document.getElementById("bg-url-input");
+  const dimInput = document.getElementById("bg-dim-input");
+  const updatePreview = () => {
+    const url = urlInput.value.trim();
+    const dim = Number(dimInput.value);
+    preview.style.backgroundImage = url
+      ? `linear-gradient(rgba(0,0,0,${dim / 100}), rgba(0,0,0,${dim / 100})), url("${url.replace(/"/g, '\\"')}")`
+      : "none";
+  };
+  updatePreview();
+  urlInput.addEventListener("input", updatePreview);
+  dimInput.addEventListener("input", updatePreview);
+
+  document.getElementById("bg-cancel-btn").onclick = closeModal;
+  document.getElementById("bg-clear-btn").onclick = async () => {
+    await updateTripBackground("", 30);
+    closeModal();
+    toast("已清除背景圖片");
+  };
+  document.getElementById("bg-save-btn").onclick = async () => {
+    const url = urlInput.value.trim();
+    const dim = Number(dimInput.value);
+    await updateTripBackground(url, dim);
+    closeModal();
+    toast(url ? "已更新背景圖片" : "已清除背景圖片");
+  };
+}
+
+function renderCurrencySettingsModal() {
+  let selected = new Set(tripCurrencies());
+  selected.add("TWD"); // 結算一律以台幣為準，所以永遠包含
+
+  openModal("貨幣設定", `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">
+      勾選這趟行程會用到的貨幣。新增消費時，只會列出這裡勾選的貨幣可以選。台幣是結算的基準幣別，會固定顯示。
+    </p>
+    <div class="checkbox-group" id="currency-checkbox-group">
+      ${CURRENCY_OPTIONS.map((c) => `
+        <div class="checkbox-chip ${selected.has(c.code) ? "checked" : ""} ${c.code === "TWD" ? "locked" : ""}" data-code="${c.code}">
+          ${escapeHtml(currencyLabel(c.code))}
+        </div>
+      `).join("")}
+    </div>
+    <p style="font-size:12px;color:var(--text-muted);margin-top:10px;">
+      非台幣消費會在新增當下，依「消費日期」自動查詢當天匯率換算成台幣一起記錄；若查詢失敗，會請新增消費的人手動輸入匯率。
+    </p>
+    <div class="form-actions">
+      <button class="secondary-btn" id="currency-cancel">取消</button>
+      <button class="primary-btn" id="currency-save">儲存</button>
+    </div>
+  `);
+  document.querySelectorAll("#currency-checkbox-group .checkbox-chip").forEach((chip) => {
+    if (chip.dataset.code === "TWD") return; // 台幣鎖定，不能取消
+    chip.addEventListener("click", () => {
+      const code = chip.dataset.code;
+      if (selected.has(code)) {
+        selected.delete(code);
+        chip.classList.remove("checked");
+      } else {
+        selected.add(code);
+        chip.classList.add("checked");
+      }
+    });
+  });
+  document.getElementById("currency-cancel").onclick = closeModal;
+  document.getElementById("currency-save").onclick = async () => {
+    await updateTripCurrencies(Array.from(selected));
+    closeModal();
+    toast("已更新貨幣設定");
+  };
+}
+
+// ------------------------------------------------------------
+// 管理成員與權限（僅統籌人 owner 可操作）
+// ------------------------------------------------------------
+function renderManageMembersModal() {
+  if (!isOwner()) {
+    toast("只有統籌人可以管理成員與權限");
+    return;
+  }
+  let members = state.trip.members.map((m) => ({ ...m, uids: memberUids(m) }));
+  const expandedUidPanels = new Set(); // 記住目前展開了哪些成員的「裝置(UID)管理」面板，避免每次 renderRows() 都收合
+
+  // 保持舊版單一 uid 欄位與新版 uids 陣列同步，避免移除 UID 後又被 memberUids() 補回來
+  function syncMemberUid(m) {
+    m.uid = m.uids[0] || null;
+  }
+
+  function uidPanelBodyHtml(m) {
+    const uids = m.uids;
+    return `
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">同一個人用不同裝置／瀏覽器登入時，可以把每台裝置的 UID 都加進來，讓它們共用同一位成員的權限。核准「編輯權限申請」時也會自動加進來。</div>
+      ${uids.length ? uids.map((uid) => {
+        const isProtectedOwnerUid = uid === state.trip.ownerUid;
+        return `
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+          <code style="flex:1;font-size:11px;word-break:break-all;">${escapeHtml(uid)}</code>
+          ${isProtectedOwnerUid
+            ? `<span class="status-tag" title="目前登入中的統籌人身份，無法在此移除">目前登入的統籌人</span>`
+            : `<button class="icon-btn remove-uid-btn" data-row="${m.id}" data-uid="${escapeHtml(uid)}" title="移除這台裝置">✕</button>`}
+        </div>`;
+      }).join("") : `<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">尚未綁定任何裝置（UID）。</div>`}
+      <div style="display:flex;gap:6px;margin-top:6px;">
+        <input type="text" placeholder="手動貼上要加入的 UID" data-add-uid-input="${m.id}" style="flex:1;padding:6px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;">
+        <button class="secondary-btn small-btn add-uid-btn" data-row="${m.id}">＋ 新增</button>
+      </div>`;
+  }
+
+  function openMemberNameEditor(member) {
+    const existing = document.getElementById("member-name-editor-overlay");
+    if (existing) existing.remove();
+    const overlay = document.createElement("div");
+    overlay.id = "member-name-editor-overlay";
+    overlay.style.cssText = "position:fixed;inset:0;z-index:120;background:rgba(20,25,22,.42);display:flex;align-items:center;justify-content:center;padding:20px;";
+    overlay.innerHTML = `
+      <div role="dialog" aria-modal="true" aria-label="修改成員名稱" style="width:100%;max-width:360px;background:var(--card-bg);color:var(--text);border-radius:16px;padding:20px;box-shadow:0 12px 40px rgba(0,0,0,.22);">
+        <div class="modal-title">修改成員名稱</div>
+        <div class="form-row"><label for="member-name-editor-input">成員名稱</label><input id="member-name-editor-input" type="text" maxlength="40" value="${escapeHtml(member.name || "")}" autocomplete="off"></div>
+        <div class="form-actions">
+          <button class="secondary-btn" id="member-name-editor-cancel">取消</button>
+          <button class="primary-btn" id="member-name-editor-save">儲存</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const input = overlay.querySelector("#member-name-editor-input");
+    const closeEditor = () => overlay.remove();
+    overlay.addEventListener("click", (event) => { if (event.target === overlay) closeEditor(); });
+    overlay.querySelector("#member-name-editor-cancel").onclick = closeEditor;
+    overlay.querySelector("#member-name-editor-save").onclick = () => {
+      const name = input.value.trim();
+      if (!name) return toast("請輸入成員名稱");
+      member.name = name;
+      closeEditor();
+      renderRows();
+    };
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") overlay.querySelector("#member-name-editor-save").click();
+      if (event.key === "Escape") closeEditor();
+    });
+    requestAnimationFrame(() => { input.focus(); input.select(); });
+  }
+
+  function rowHtml(m) {
+    const uidCount = m.uids.length;
+    return `
+      <div class="block-editor-row" data-row="${m.id}">
+        <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:100px;">
+          <span style="flex:1;min-width:0;overflow-wrap:anywhere;">${escapeHtml(m.name || "未命名成員")}</span>
+          <button type="button" class="icon-btn edit-member-name-btn" data-row="${m.id}" title="修改成員名稱" aria-label="修改成員名稱" style="display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;min-width:34px;min-height:34px;font-size:18px;cursor:pointer;">✏️</button>
+        </div>
+        <select data-field="permission" data-row="${m.id}" style="padding:8px;border:1px solid var(--border);border-radius:8px;">
+          <option value="owner" ${m.permission === "owner" ? "selected" : ""}>統籌人</option>
+          <option value="editor" ${m.permission === "editor" ? "selected" : ""}>可編輯</option>
+          <option value="viewer" ${m.permission === "viewer" ? "selected" : ""}>唯讀</option>
+        </select>
+        <button class="icon-btn toggle-uid-btn" data-row="${m.id}" title="管理裝置（UID）">🔧${uidCount ? ` ${uidCount}` : ""}</button>
+        <button class="icon-btn remove-member-row" data-row="${m.id}">✕</button>
+      </div>
+      <div class="member-uid-panel" data-uid-panel="${m.id}" style="display:none;">
+        ${uidPanelBodyHtml(m)}
+      </div>`;
+  }
+  function renderRows() {
+    const wrap = document.getElementById("manage-members-wrap");
+    wrap.innerHTML = members.map(rowHtml).join("");
+    members.forEach((m) => {
+      if (!expandedUidPanels.has(m.id)) return;
+      const panel = wrap.querySelector(`[data-uid-panel="${m.id}"]`);
+      if (panel) panel.style.display = "block";
+    });
+
+    wrap.querySelectorAll(".edit-member-name-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const member = members.find((x) => x.id === btn.dataset.row);
+        if (member) openMemberNameEditor(member);
+      });
+    });
+    wrap.querySelectorAll("select[data-field=permission]").forEach((sel) => {
+      sel.addEventListener("change", () => {
+        members.find((x) => x.id === sel.dataset.row).permission = sel.value;
+      });
+    });
+    wrap.querySelectorAll(".remove-member-row").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        if (members.length <= 1) return toast("至少要保留一位成員");
+        members = members.filter((x) => x.id !== btn.dataset.row);
+        renderRows();
+      });
+    });
+    wrap.querySelectorAll(".toggle-uid-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const id = btn.dataset.row;
+        if (expandedUidPanels.has(id)) expandedUidPanels.delete(id);
+        else expandedUidPanels.add(id);
+        renderRows();
+      });
+    });
+    wrap.querySelectorAll(".remove-uid-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const m = members.find((x) => x.id === btn.dataset.row);
+        if (!m) return;
+        m.uids = m.uids.filter((u) => u !== btn.dataset.uid);
+        syncMemberUid(m);
+        expandedUidPanels.add(m.id);
+        renderRows();
+      });
+    });
+    wrap.querySelectorAll(".add-uid-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const m = members.find((x) => x.id === btn.dataset.row);
+        const input = wrap.querySelector(`[data-add-uid-input="${btn.dataset.row}"]`);
+        const value = (input.value || "").trim();
+        if (!m || !value) return;
+        const ownedByOther = members.find((x) => x.id !== m.id && x.uids.includes(value));
+        if (ownedByOther) {
+          toast(`這個 UID 已經綁定在「${ownedByOther.name || "另一位成員"}」，請先從那邊移除`);
+          return;
+        }
+        if (!m.uids.includes(value)) m.uids.push(value);
+        syncMemberUid(m);
+        expandedUidPanels.add(m.id);
+        renderRows();
+        toast("已加入，記得按下方「儲存」才會生效");
+      });
+    });
+  }
+
+  async function renderInviteLinksList() {
+    const listWrap = document.getElementById("invite-links-list");
+    if (!listWrap) return;
+    listWrap.innerHTML = `<p style="color:var(--text-muted);font-size:13px;">載入中...</p>`;
+    const links = await loadInviteLinks();
+    if (links === null) {
+      listWrap.innerHTML = `<p style="color:var(--danger);font-size:13px;">邀請連結清單載入失敗，請確認 Firestore Rules 是否已加入 inviteLinks 的規則。</p>`;
+      return;
+    }
+    if (!links.length) {
+      listWrap.innerHTML = `<p style="color:var(--text-muted);font-size:13px;">目前沒有任何邀請連結。</p>`;
+      return;
+    }
+    const allRequests = await loadAccessRequests().catch(() => []);
+    listWrap.innerHTML = links.map((link) => {
+      const status = inviteLinkStatus(link);
+      const inviteUrl = `${window.location.origin}${window.location.pathname}#/s/${link.id}`;
+      const usedCount = approvedCountForCode(allRequests, link.id, null);
+      const usageText = link.maxUses ? `已核准 ${usedCount} ／ ${link.maxUses} 次` : `已核准 ${usedCount} 次（無限制）`;
+      return `
+        <div class="invite-link-card" data-invite-code="${link.id}">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+            <strong style="font-size:13px;">${escapeHtml(link.label || "（未命名連結）")}</strong>
+            <span class="status-tag status-${status}">${inviteLinkStatusLabel(status)}</span>
+          </div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${escapeHtml(usageText)}</div>
+          <div style="margin-top:7px;padding:7px 9px;background:var(--surface-muted,#F6F8F6);border-radius:6px;">
+            <div style="font-size:10px;color:var(--text-muted);">12 碼代碼</div>
+            <code style="font-size:16px;letter-spacing:2px;font-weight:700;word-break:break-all;">${escapeHtml(link.id)}</code>
+          </div>
+          <div style="margin-top:6px;font-size:11px;word-break:break-all;color:var(--text-muted);">${escapeHtml(inviteUrl)}</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px;">
+            <button class="secondary-btn small-btn copy-invite-btn" data-url="${escapeHtml(inviteUrl)}">📋 複製</button>
+            <input type="datetime-local" class="invite-expiry-input" data-code="${link.id}" value="${toDatetimeLocalValue(link.expiresAt)}" style="padding:6px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;" ${status === "revoked" ? "disabled" : ""}>
+            <button class="secondary-btn small-btn save-invite-expiry-btn" data-code="${link.id}" ${status === "revoked" ? "disabled" : ""}>更新到期時間</button>
+            <input type="number" min="1" max="10000" class="invite-maxuses-input" data-code="${link.id}" value="${link.maxUses || ""}" placeholder="次數上限" style="width:110px;padding:6px 8px;font-size:12px;border:1px solid var(--border);border-radius:6px;" ${status === "revoked" ? "disabled" : ""}>
+            <button class="secondary-btn small-btn save-invite-maxuses-btn" data-code="${link.id}" ${status === "revoked" ? "disabled" : ""}>更新次數上限</button>
+            <button class="danger-btn small-btn delete-invite-btn" data-code="${link.id}">${status === "revoked" ? "刪除" : "撤銷並刪除"}</button>
+          </div>
+        </div>`;
+    }).join("");
+
+    listWrap.querySelectorAll(".copy-invite-btn").forEach((btn) => {
+      btn.addEventListener("click", () => copyText(btn.dataset.url, "邀請連結已複製"));
+    });
+    listWrap.querySelectorAll(".save-invite-expiry-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const input = listWrap.querySelector(`.invite-expiry-input[data-code="${btn.dataset.code}"]`);
+        const dateValue = parseDatetimeLocal(input.value);
+        btn.disabled = true;
+        try {
+          await setInviteLinkExpiry(btn.dataset.code, dateValue);
+          toast(dateValue ? "已更新到期時間" : "已設為永久有效");
+          await renderInviteLinksList();
+        } catch (err) {
+          console.error(err);
+          toast("更新失敗，請稍後再試");
+          btn.disabled = false;
+        }
+      });
+    });
+    listWrap.querySelectorAll(".save-invite-maxuses-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const input = listWrap.querySelector(`.invite-maxuses-input[data-code="${btn.dataset.code}"]`);
+        const raw = input.value.trim();
+        const value = raw ? Math.max(1, Math.min(10000, parseInt(raw, 10) || 0)) : null;
+        if (raw && !value) return toast("次數上限請輸入正整數");
+        btn.disabled = true;
+        try {
+          await setInviteLinkMaxUses(btn.dataset.code, value);
+          toast(value ? "已更新次數上限" : "已設為無限次");
+          await renderInviteLinksList();
+        } catch (err) {
+          console.error(err);
+          toast("更新失敗，請稍後再試");
+          btn.disabled = false;
+        }
+      });
+    });
+    listWrap.querySelectorAll(".delete-invite-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const link = links.find((x) => x.id === btn.dataset.code);
+        const status = link ? inviteLinkStatus(link) : "active";
+        const msg = status === "active"
+          ? "確定要撤銷並刪除這組邀請連結嗎？\n刪除後網址將立即失效，且無法恢復。"
+          : "確定要永久刪除這組邀請連結嗎？\n刪除後無法恢復。";
+        if (!confirm(msg)) return;
+        btn.disabled = true;
+        try {
+          await deleteInviteLink(btn.dataset.code);
+          toast("已刪除邀請連結，網址已失效");
+          await renderInviteLinksList();
+        } catch (err) {
+          console.error(err);
+          toast("刪除失敗，請稍後再試");
+          btn.disabled = false;
+        }
+      });
+    });
+  }
+
+  async function renderInviteLinksSection() {
+    const wrap = document.getElementById("invite-links-wrap");
+    wrap.innerHTML = `
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;">
+        <input type="text" id="new-invite-label" placeholder="連結用途（選填，例如：家族群組）" style="flex:1;min-width:140px;padding:8px;border:1px solid var(--border);border-radius:8px;font-size:13px;">
+        <input type="datetime-local" id="new-invite-expiry" style="padding:8px;border:1px solid var(--border);border-radius:8px;font-size:13px;">
+        <input type="number" min="1" max="10000" id="new-invite-maxuses" placeholder="次數上限（留空=無限）" style="width:150px;padding:8px;border:1px solid var(--border);border-radius:8px;font-size:13px;">
+        <button class="primary-btn small-btn" id="create-invite-btn">＋ 建立邀請連結</button>
+      </div>
+      <p style="font-size:11px;color:var(--text-muted);margin:0 0 10px;">到期時間與次數上限都留空表示無限制；建立後仍可隨時回來調整，也可以同時建立多組（例如分別給不同群組）。</p>
+      <div id="invite-links-list"><p style="color:var(--text-muted);font-size:13px;">載入中...</p></div>
+    `;
+    document.getElementById("create-invite-btn").addEventListener("click", async () => {
+      const btn = document.getElementById("create-invite-btn");
+      const label = document.getElementById("new-invite-label").value;
+      const expiresAt = parseDatetimeLocal(document.getElementById("new-invite-expiry").value);
+      const maxUsesRaw = document.getElementById("new-invite-maxuses").value.trim();
+      const maxUses = maxUsesRaw ? Math.max(1, Math.min(10000, parseInt(maxUsesRaw, 10) || 0)) : null;
+      if (maxUsesRaw && !maxUses) return toast("次數上限請輸入正整數");
+      btn.disabled = true;
+      btn.textContent = "建立中...";
+      try {
+        const result = await createTripInviteLink({ label, expiresAt, maxUses });
+        if (!result.code) {
+          toast(shortlinkErrorMessage(result.error));
+        } else {
+          toast("已建立邀請連結");
+          document.getElementById("new-invite-label").value = "";
+          document.getElementById("new-invite-expiry").value = "";
+          document.getElementById("new-invite-maxuses").value = "";
+          await renderInviteLinksList();
+        }
+      } catch (err) {
+        console.error(err);
+        toast("建立邀請連結失敗");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "＋ 建立邀請連結";
+      }
+    });
+    await renderInviteLinksList();
+  }
+
+  openModal("管理成員與權限", `
+    <div id="manage-members-wrap"></div>
+    <button class="secondary-btn small-btn" id="manage-add-member-btn" style="margin-top:4px;">＋ 新增成員</button>
+    <div style="border-top:1px dashed var(--border);margin-top:16px;padding-top:12px;">
+      <h4 style="margin:0 0 8px;">編輯權限申請</h4>
+      <div id="access-requests-wrap"><p style="color:var(--text-muted);font-size:13px;">載入中...</p></div>
+    </div>
+    <div style="border-top:1px dashed var(--border);margin-top:16px;padding-top:12px;">
+      <h4 style="margin:0 0 8px;">邀請連結管理</h4>
+      <div id="invite-links-wrap"><p style="color:var(--text-muted);font-size:13px;">載入中...</p></div>
+    </div>
+    <p style="font-size:12px;color:var(--text-muted);margin-top:12px;">
+      提醒：移除成員不會刪除他過去留下的許願池留言或消費紀錄，但他將無法再用原本的身份登入。
+    </p>
+    <div class="form-actions">
+      <button class="secondary-btn" id="manage-cancel">取消</button>
+      <button class="primary-btn" id="manage-save">儲存</button>
+    </div>
+  `);
+  renderRows();
+  renderInviteLinksSection();
+  (async () => {
+    const wrap = document.getElementById("access-requests-wrap");
+    try {
+      const allRequests = await loadAccessRequests();
+      const requests = allRequests.filter((r) => r.status === "pending");
+      if (!requests.length) {
+        wrap.innerHTML = `<p style="color:var(--text-muted);font-size:13px;">目前沒有待審核申請。</p>`;
+        return;
+      }
+      const links = (await loadInviteLinks()) || [];
+      const linkByCode = Object.fromEntries(links.map((l) => [l.id, l]));
+      const candidates = members.filter((m) => m.permission !== "owner");
+      wrap.innerHTML = requests.map((r) => {
+        const link = r.inviteCode ? linkByCode[r.inviteCode] : null;
+        const approvedSoFar = approvedCountForCode(allRequests, r.inviteCode, r.id);
+        const atCap = link?.maxUses ? approvedSoFar >= link.maxUses : false;
+        return `
+        <div class="card" style="padding:10px;margin-bottom:8px;">
+          <div style="font-size:12px;word-break:break-all;">UID：${escapeHtml(r.requestedUid)}</div>
+          ${link ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">來源連結：${escapeHtml(link.label || "（未命名連結）")}${link.maxUses ? `　已核准 ${approvedSoFar} ／ ${link.maxUses} 次` : ""}</div>` : ""}
+          ${atCap ? `<div style="font-size:11px;color:var(--danger);margin-top:2px;">⚠️ 這組連結已達你設定的次數上限，核准前會再次跟你確認。</div>` : ""}
+          <div style="display:flex;gap:6px;align-items:center;margin-top:8px;">
+            <select data-request-member="${r.id}" style="flex:1;padding:8px;border:1px solid var(--border);border-radius:8px;">
+              <option value="">選擇要綁定的成員</option>
+              ${candidates.map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)}（${permLabel(m.permission)}）</option>`).join("")}
+            </select>
+            <button class="primary-btn small-btn" data-approve-request="${r.id}" data-atcap="${atCap ? "1" : "0"}">核准</button>
+            <button class="secondary-btn small-btn" data-reject-request="${r.id}">拒絕</button>
+          </div>
+        </div>`;
+      }).join("");
+      wrap.querySelectorAll("[data-approve-request]").forEach((btn) => {
+        btn.onclick = async () => {
+          const req = requests.find((r) => r.id === btn.dataset.approveRequest);
+          const select = wrap.querySelector(`[data-request-member="${req.id}"]`);
+          if (!select.value) return toast("請先選擇要綁定的成員");
+          if (btn.dataset.atcap === "1" && !confirm("這組邀請連結已達你設定的次數上限，仍要核准這筆申請嗎？（也可以先去下方調高次數上限）")) return;
+          try {
+            btn.disabled = true;
+            await approveAccessRequest(req.id, req.requestedUid, select.value);
+            toast("已核准編輯權限，請通知對方重新整理");
+            closeModal();
+          } catch (err) {
+            console.error(err);
+            toast("核准失敗，請確認規則及成員資料");
+            btn.disabled = false;
+          }
+        };
+      });
+      wrap.querySelectorAll("[data-reject-request]").forEach((btn) => {
+        btn.onclick = async () => {
+          try {
+            await rejectAccessRequest(btn.dataset.rejectRequest);
+            toast("已拒絕申請");
+            closeModal();
+          } catch (err) {
+            console.error(err);
+            toast("拒絕申請失敗");
+          }
+        };
+      });
+    } catch (err) {
+      console.error(err);
+      wrap.innerHTML = `<p style="color:var(--danger);font-size:13px;">申請資料載入失敗，請確認 Firestore Rules。</p>`;
+    }
+  })();
+  document.getElementById("manage-add-member-btn").addEventListener("click", () => {
+    members.push({ id: newLocalId(), name: "", permission: "editor", uid: null, uids: [] });
+    renderRows();
+  });
+  document.getElementById("manage-cancel").onclick = closeModal;
+  document.getElementById("manage-save").onclick = async () => {
+    const cleaned = members.filter((m) => m.name.trim()).map((m) => ({ ...m, name: m.name.trim() }));
+    if (!cleaned.length) return toast("至少要有一位成員");
+    if (!cleaned.some((m) => m.permission === "owner")) {
+      return toast("至少要有一位統籌人（owner）");
+    }
+    try {
+      await updateTripMembers(cleaned);
+      closeModal();
+      toast("已更新成員設定");
+    } catch (err) {
+      console.error(err);
+      toast(err.message || "成員設定儲存失敗，請確認統籌人資料");
+    }
+  };
+}
+
+// ------------------------------------------------------------
+// 啟動
+// ------------------------------------------------------------
+authReady.then(() => {
+  route();
 });
