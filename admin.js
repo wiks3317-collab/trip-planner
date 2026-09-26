@@ -5,7 +5,7 @@
 // 例如 escapeHtml／renderBlockView，避免兩邊互相依賴）。
 // ============================================================
 
-import { db, auth, adminSignIn, adminSignOut, onAuthStateChanged } from "./admin-firebase-config.js";
+import { db, auth, adminSignIn, adminSignOut, onAuthStateChanged } from "./admin-firebase-config.js?v=21p2";
 import {
   collection, doc, getDoc, getDocs, updateDoc, query, orderBy, serverTimestamp, writeBatch, runTransaction, limit, Timestamp,
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
