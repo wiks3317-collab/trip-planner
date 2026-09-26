@@ -9,7 +9,135 @@
 //
 // ⚠️ 请把下面 firebaseConfig 換成跟 firebase-config.js 裡「完全相同」的
 // 那組設定值（同一個 Firebase 專案）。兩份檔案目前是各自獨立維護，
-// 如果之後在 Firebase 主控台建立了新的網頁應用程式設定，記得兩份都要更新。
+// 如果之後在 Firebase 主控台建立了新的網頁應用程式設定，記<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />
+<meta name="googlebot" content="noindex, nofollow, noarchive, nosnippet" />
+<title>管理後台 · 旅行行程規劃工具</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>%F0%9F%9B%A0%EF%B8%8F</text></svg>" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="style.css" />
+<style>
+  /* 只給 admin.html 用的版面樣式，不會影響 style.css 原本給一般頁面用的規則 */
+  html, body { max-width: 100%; }
+  body { padding: 24px 16px; overflow-x: hidden; }
+  #admin-root { max-width: 900px; margin: 0 auto; }
+  .admin-card {
+    background: var(--card-bg, #fff);
+    border: 1px solid var(--border, #DCE3DC);
+    border-radius: 12px;
+    padding: 24px;
+    max-width: 100%;
+    overflow-x: hidden; /* 卡片本身絕不橫向溢出，內部個別表格自己捲動 */
+  }
+  /* 任何比卡片寬的內容（表格、長 UID／行程 ID）都在自己的容器內橫向捲動，
+     而不是把整個白色卡片撐寬，這是手機版清單「超出白色方格」的主因。 */
+  .admin-table-scroll { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; margin-top: 16px; }
+  .admin-table-scroll .admin-table { margin-top: 0; }
+  .admin-card code { word-break: break-all; }
+  .admin-card h1 { margin: 0 0 8px; font-size: 20px; }
+  .admin-muted { color: var(--text-muted, #5C6A61); font-size: 14px; line-height: 1.6; }
+  .admin-topbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 8px; }
+  .admin-primary-btn, .admin-secondary-btn {
+    font: inherit; cursor: pointer; border-radius: 8px; padding: 10px 16px; font-weight: 600;
+  }
+  .admin-primary-btn { background: var(--primary, #0E6B64); color: #fff; border: none; margin-top: 12px; }
+  .admin-primary-btn:hover { background: var(--primary-dark, #0A5450); }
+  .admin-secondary-btn { background: var(--card-bg, #fff); color: var(--text, #1C2420); border: 1px solid var(--border, #DCE3DC); }
+  .admin-secondary-btn:hover { border-color: var(--primary, #0E6B64); }
+  .admin-uid-box {
+    font-family: monospace; background: var(--bg, #EEF3F0); border: 1px solid var(--border, #DCE3DC);
+    border-radius: 8px; padding: 10px 12px; margin: 8px 0 16px; word-break: break-all; font-size: 13px;
+  }
+  /* 表格清單的版面邏輯：
+     - 平板／桌面（寬度足夠）：正常表格；如果內容還是比容器寬，.admin-table-scroll 讓表格本身可以左右滑動，
+       不會撐開外面的白色卡片。
+     - 手機（窄螢幕）：改成「一列一張卡片」的直式排列（每個欄位變成一行 標籤：內容），
+       這樣完全不需要左右滑動就能看到所有欄位，比橫向捲動更容易閱讀。 */
+  .admin-table { width: 100%; min-width: 560px; border-collapse: collapse; font-size: 14px; }
+  .admin-table th, .admin-table td { text-align: left; padding: 8px 10px; border-bottom: 1px dashed var(--border, #DCE3DC); white-space: nowrap; }
+  .admin-table td:first-child, .admin-table th:first-child { white-space: normal; }
+
+  @media (max-width: 680px) {
+    .admin-table-scroll { overflow-x: visible; }
+    .admin-table { min-width: 0; width: 100%; }
+    .admin-table thead {
+      position: absolute; width: 1px; height: 1px; overflow: hidden;
+      clip: rect(0 0 0 0); white-space: nowrap; border: 0; padding: 0; margin: -1px;
+    }
+    .admin-table, .admin-table tbody, .admin-table tr, .admin-table td { display: block; width: 100%; }
+    .admin-table tr {
+      border: 1px solid var(--border, #DCE3DC); border-radius: 10px;
+      padding: 4px 12px; margin-bottom: 10px;
+    }
+    .admin-table td {
+      border: none; border-bottom: 1px dashed var(--border, #DCE3DC);
+      padding: 8px 0; white-space: normal; text-align: right;
+      display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;
+    }
+    .admin-table td:last-child { border-bottom: none; }
+    .admin-table td::before {
+      content: attr(data-label); font-weight: 600; color: var(--text-muted, #5C6A61);
+      text-align: left; flex-shrink: 0;
+    }
+    .admin-table td:empty { display: none; }
+    .admin-table td.admin-row-actions { justify-content: flex-end; }
+    .admin-table td.admin-row-actions::before { content: none; }
+  }
+  .admin-link { color: var(--primary-dark, #0A5450); font-weight: 600; text-decoration: none; }
+  .admin-link:hover { text-decoration: underline; }
+  code { font-family: monospace; }
+  .hidden { display: none !important; }
+
+  /* 行程摘要清單：狀態徽章、操作按鈕 */
+  .admin-row-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .admin-link-btn {
+    font: inherit; cursor: pointer; background: none; border: none; padding: 0;
+    color: var(--primary-dark, #0A5450); font-weight: 600; text-decoration: underline;
+  }
+  .admin-link-btn.admin-danger { color: #B3402A; }
+  .admin-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .admin-badge-active { background: color-mix(in srgb, var(--primary, #0E6B64) 15%, white); color: var(--primary-dark, #0A5450); }
+  .admin-badge-disabled { background: #F6E3DE; color: #B3402A; }
+
+  /* 行程內容唯讀檢視 */
+  .admin-section-title { margin: 24px 0 8px; font-size: 17px; }
+  .admin-day-block { border: 1px solid var(--border, #DCE3DC); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+  .admin-day-block h3 { margin: 0 0 6px; font-size: 15px; }
+  .admin-spot-block { margin: 10px 0 0 12px; padding: 8px 0 8px 12px; border-left: 2px solid var(--border, #DCE3DC); }
+  .admin-spot-block h4 { margin: 0 0 4px; font-size: 14px; }
+  .admin-blocks { font-size: 13px; color: var(--text, #1C2420); margin: 4px 0; }
+  .admin-block-text { white-space: pre-wrap; margin: 4px 0; }
+  .admin-block-image img { max-width: 220px; border-radius: 6px; display: block; margin: 4px 0; }
+  .admin-block-table table { border-collapse: collapse; font-size: 12px; }
+  .admin-block-table th, .admin-block-table td { border: 1px solid var(--border, #DCE3DC); padding: 4px 6px; }
+  .admin-wishes { margin-top: 6px; }
+  .admin-wish { background: var(--bg, #EEF3F0); border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; font-size: 13px; word-break: break-word; }
+  .admin-wish-meta { color: var(--text-muted, #5C6A61); font-size: 12px; margin-bottom: 2px; }
+
+  /* 手機版：縮小外圍留白與字體，讓表格捲動區更明顯是「可以左右滑」而不是版面跑掉 */
+  @media (max-width: 600px) {
+    body { padding: 12px 8px; }
+    .admin-card { padding: 16px 14px; border-radius: 10px; }
+    .admin-card h1 { font-size: 18px; }
+    .admin-table th, .admin-table td { padding: 8px; font-size: 13px; }
+    #admin-search { min-width: 0 !important; flex: 1 1 100% !important; }
+    #admin-filter { flex: 1 1 100% !important; }
+  }
+</style>
+</head>
+<body>
+  <div id="admin-root"></div>
+  <script type="module" src="admin-firebase-config.js"></script>
+  <script type="module" src="admin.js"></script>
+</body>
+</html>
+得兩份都要更新。
 // ============================================================
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
