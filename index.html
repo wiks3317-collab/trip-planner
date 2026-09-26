@@ -74,6 +74,29 @@
   <!-- Toast 提示 -->
   <div id="toast-container"></div>
 
-  <script type="module" src="app.js?v=21p3stable"></script>
+  <script>
+    (function () {
+      var started = Date.now();
+      window.__TRIP_APP_STARTED__ = true;
+      setTimeout(function () {
+        if (document.getElementById("loading-screen")) {
+          var root = document.getElementById("app-root");
+          var box = document.createElement("div");
+          box.className = "card";
+          box.style.cssText = "margin:20px;padding:24px;text-align:center;";
+          var title = document.createElement("h3");
+          title.textContent = "⚠️ 網站初始化逾時";
+          var msg = document.createElement("p");
+          msg.style.color = "var(--text-muted)";
+          msg.textContent = "Firebase 尚未在 10 秒內完成初始化。請確認網路連線後再重新整理。";
+          box.appendChild(title);
+          box.appendChild(msg);
+          root.innerHTML = "";
+          root.appendChild(box);
+        }
+      }, 10000);
+    }());
+  </script>
+  <script type="module" src="app.js?v=21p3fix5"></script>
 </body>
 </html>

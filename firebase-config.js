@@ -23,7 +23,12 @@ const auth = getAuth(app);
 // 匿名登入：讓每個瀏覽器有一個穩定的 uid，純技術用途，
 // 使用者完全不會看到登入畫面，也不需要輸入帳密。
 let authReadyResolve;
-export const authReady = new Promise((res) => (authReadyResolve = res));
+let authReadySettled = false;
+export const authReady = new Promise((res) => (authReadyResolve = (value) => {
+  if (authReadySettled) return;
+  authReadySettled = true;
+  res(value);
+}));
 
 // 注意：全新瀏覽器（例如無痕視窗）第一次載入時，onAuthStateChanged 會先回傳 user = null，
 // 這時匿名登入還沒完成。如果此時就讓網站開始讀取資料，Firestore 會因為「未登入」而拒絕，
@@ -32,9 +37,20 @@ onAuthStateChanged(auth, (user) => {
   if (user) authReadyResolve(user);
 });
 
+const authTimeout = setTimeout(() => {
+  if (!authReadySettled) {
+    console.error("匿名登入逾時：8 秒內沒有完成 Firebase Authentication 初始化");
+    authReadyResolve(null);
+  }
+}, 8000);
+
 signInAnonymously(auth)
-  .then((cred) => authReadyResolve(cred.user))
+  .then((cred) => {
+    clearTimeout(authTimeout);
+    authReadyResolve(cred.user);
+  })
   .catch((err) => {
+    clearTimeout(authTimeout);
     console.error("匿名登入失敗", err);
     authReadyResolve(null);
   });
