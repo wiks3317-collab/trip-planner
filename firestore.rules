@@ -376,7 +376,11 @@ service cloud.firestore {
             && request.resource.data.status == 'pending'
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'createdAt', 'inviteCode'])
             && canRequestAccess(tripId));
-        allow delete: if false;
+        // v21p5：原本一律禁止刪除，導致有人拿邀請代碼灌爆申請後永遠清不掉。
+        // 現在統籌人可清理自己行程的申請（含待審／已結案）；具編輯權限的系統管理員需 15 分鐘內重新登入。
+        // 刪除申請不會影響已寫入 trips.access 的成員身份，只是移除申請紀錄。
+        allow delete: if isOwner(tripId)
+          || (isAdminEditor() && recentlyAuthenticated());
       }
     }
 
