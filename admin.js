@@ -385,6 +385,24 @@ async function loadAdminInviteRequests(tripId) {
     return [];
   }
 }
+// v21p5：清理申請紀錄（Rules 要求 adminEditor + 15 分鐘內重新登入）。scope：closed=已結案、all=全部。
+async function purgeAdminAccessRequests(tripId, scope) {
+  if (!adminCanEdit) throw new Error("沒有清理權限");
+  const list = (detailCtx?.inviteRequests || []).filter((r) => scope === "all" || r.status !== "pending");
+  if (!list.length) return 0;
+  for (let i = 0; i < list.length; i += 200) {
+    const batch = writeBatch(db);
+    list.slice(i, i + 200).forEach((r) => batch.delete(doc(db, "trips", tripId, "accessRequests", r.id)));
+    if (i === 0) {
+      batch.set(doc(collection(db, "adminAuditLogs")), {
+        adminUid: currentUser?.uid || null, adminEmail: currentUser?.email || null, tripId,
+        action: "access-requests-purge", detail: { scope, count: list.length }, createdAt: serverTimestamp()
+      });
+    }
+    await batch.commit();
+  }
+  return list.length;
+}
 async function updateAdminInviteLink(tripId, code, patch, action, detail) {
   if (!adminCanEdit) throw new Error("沒有邀請連結編輯權限");
   const batch = writeBatch(db);
@@ -461,7 +479,14 @@ function genAdminShortCode(len = 12) {
 function renderAdminInviteLinksSection(trip, links, requests) {
   const counts = {};
   requests.filter(r => r.status === "approved" && r.inviteCode).forEach(r => { counts[r.inviteCode] = (counts[r.inviteCode] || 0) + 1; });
+  const pendingN = requests.filter(r => r.status === "pending").length, closedN = requests.length - pendingN;
+  const purgeHtml = (adminCanEdit && requests.length) ? `<div class="admin-row-actions" style="margin:8px 0;">
+      <span class="admin-muted">加入申請：待審 ${pendingN} 筆、已結案 ${closedN} 筆</span>
+      ${closedN ? btn("requests-purge", `🧹 清除已結案（${closedN}）`, { scope: "closed" }) : ""}
+      ${pendingN ? btn("requests-purge", `🗑️ 清除全部申請（${requests.length}）`, { scope: "all" }, true) : ""}
+    </div>` : "";
   if (!links.length) return `<h2 class="admin-section-title">🔗 邀請連結</h2>
+    ${purgeHtml}
     ${adminCanEdit ? `<div class="admin-row-actions" style="margin:8px 0 12px;">
       <input id="admin-new-invite-label" placeholder="連結用途（選填）" style="flex:1;min-width:150px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font:inherit;">
       <input id="admin-new-invite-expiry" type="datetime-local" style="padding:8px;border:1px solid var(--border);border-radius:8px;">
@@ -471,6 +496,7 @@ function renderAdminInviteLinksSection(trip, links, requests) {
     <p class="admin-muted">目前沒有邀請連結。</p>`;
   return `<h2 class="admin-section-title">🔗 邀請連結</h2>
     <p class="admin-muted">邀請代碼一律由系統隨機產生 12 碼，介面不提供手動編輯代碼。具編輯權限者可建立、調整到期時間／次數上限或永久刪除；所有建立與修改操作均寫入稽核紀錄。6 碼連結會標示為舊版，建議逐一清除。</p>
+    ${purgeHtml}
     ${adminCanEdit ? `<div class="admin-row-actions" style="margin:8px 0 12px;">
       <input id="admin-new-invite-label" placeholder="連結用途（選填）" style="flex:1;min-width:150px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font:inherit;">
       <input id="admin-new-invite-expiry" type="datetime-local" style="padding:8px;border:1px solid var(--border);border-radius:8px;">
@@ -787,6 +813,22 @@ async function onRootClick(e) {
     const { tripId, trip, tree } = detailCtx;
     if (d.act === "export") return await exportTrip();
     if (d.act === "import") return await importTripAsNew();
+    if (d.act === "requests-purge") {
+      if (!adminCanEdit) return;
+      const all = d.scope === "all";
+      if (!window.confirm(all ? "確定清除這個行程「全部」加入申請（含待審）嗎？不影響已加入的成員。" : "確定清除已結案（已核准／已拒絕）的加入申請嗎？不影響已加入的成員。")) return;
+      if (!(await ensureRecentLogin("清除加入申請"))) return;
+      try {
+        const n = await purgeAdminAccessRequests(tripId, d.scope);
+        window.alert(`已清除 ${n} 筆申請紀錄，並寫入稽核紀錄。`);
+      } catch (err) {
+        console.error(err);
+        window.alert("清除失敗：" + (err.message || String(err)) + "\n請確認 Firestore Rules 已更新到 v21p5。");
+        return;
+      }
+      await showTripDetail(tripId);
+      return;
+    }
     if (d.act === "invite-delete" || d.act === "invite-edit") {
       if (!adminCanEdit) return;
       const link = (detailCtx.inviteLinks || []).find(x => x.id === d.code);
