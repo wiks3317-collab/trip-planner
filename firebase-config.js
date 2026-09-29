@@ -7,6 +7,9 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
 import {
   getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 import {
   getAuth,
@@ -25,7 +28,22 @@ if (appCheckSiteKey) {
   if (["localhost", "127.0.0.1"].includes(location.hostname)) self.FIREBASE_APPCHECK_DEBUG_TOKEN = true;
   initializeAppCheck(app, { provider: new ReCaptchaV3Provider(appCheckSiteKey), isTokenAutoRefreshEnabled: true });
 }
-const db = getFirestore(app);
+// v21p6：離線支援。啟用 Firestore 本機持久快取（IndexedDB）：
+//  - 看過的行程斷網也能開；離線時的新增／修改會先存在這台裝置，恢復網路後自動上傳並讓其他人看到。
+//  - 多分頁管理器：同一個瀏覽器開多個分頁不會互相搶快取。
+// 瀏覽器不支援 IndexedDB（或初始化失敗）時退回原本「僅記憶體」的行為，網站照常可用，只是沒有離線功能。
+let db;
+let offlineCacheMode = "memory";
+try {
+  if (typeof indexedDB === "undefined" || !indexedDB) throw new Error("此瀏覽器沒有 IndexedDB");
+  db = initializeFirestore(app, {
+    localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+  });
+  offlineCacheMode = "persistent";
+} catch (err) {
+  console.warn("[offline] 無法啟用本機快取，改用僅記憶體模式：", err);
+  db = getFirestore(app);
+}
 const auth = getAuth(app);
 
 // 匿名登入：讓每個瀏覽器有一個穩定的 uid，純技術用途，
@@ -63,5 +81,5 @@ signInAnonymously(auth)
     authReadyResolve(null);
   });
 
-window.__FIREBASE__ = { app, db, auth };
-export { app, db, auth };
+window.__FIREBASE__ = { app, db, auth, offlineCacheMode };
+export { app, db, auth, offlineCacheMode };
