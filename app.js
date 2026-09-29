@@ -434,6 +434,42 @@ function updateMyTripName(id, name) {
 function removeMyTrip(id) {
   localStorage.setItem(LS_MY_TRIPS, JSON.stringify(getMyTrips().filter((t) => t.id !== id)));
 }
+// v21p7：記住「這台裝置是透過哪一組邀請連結進到哪個行程」。
+// 以 tripId 為 key，所以不會把 A 行程的邀請帶到 B 行程；重新整理頁面也不會遺失。
+// 這只是前端記憶，真正的驗證仍由 Firestore Rules（canRequestAccess）逐次核對邀請碼與行程。
+const LS_PENDING_INVITES = "tp_pending_invites"; // { [tripId]: { code, at } }
+const PENDING_INVITE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+function readPendingInvites() {
+  try {
+    const o = JSON.parse(localStorage.getItem(LS_PENDING_INVITES) || "{}");
+    return o && typeof o === "object" ? o : {};
+  } catch {
+    return {};
+  }
+}
+function setPendingInvite(tripId, code) {
+  if (!tripId || !code) return;
+  try {
+    const all = readPendingInvites();
+    const now = Date.now();
+    Object.keys(all).forEach((k) => { if (!all[k] || now - (all[k].at || 0) > PENDING_INVITE_TTL_MS) delete all[k]; });
+    all[tripId] = { code, at: now };
+    localStorage.setItem(LS_PENDING_INVITES, JSON.stringify(all));
+  } catch { /* localStorage 不可用時，只是重新整理後要再點一次邀請連結 */ }
+}
+function getPendingInvite(tripId) {
+  const item = readPendingInvites()[tripId];
+  if (!item || !item.code || Date.now() - (item.at || 0) > PENDING_INVITE_TTL_MS) return null;
+  return item.code;
+}
+function clearPendingInvite(tripId) {
+  try {
+    const all = readPendingInvites();
+    if (!(tripId in all)) return;
+    delete all[tripId];
+    localStorage.setItem(LS_PENDING_INVITES, JSON.stringify(all));
+  } catch { /* ignore */ }
+}
 function currentUid() {
   return auth.currentUser?.uid || null;
 }
@@ -689,11 +725,13 @@ async function route() {
   }
 
   if (state.tripId !== r.tripId) {
-    // 直接輸入／切換到 tripId 時，不沿用上一個邀請連結的狀態。
-    if (!r.shortCode) {
-      state.openedViaInvite = false;
-      state.inviteCode = null;
-    }
+    // v21p7 修正：舊版這裡「一律」把邀請狀態清成 false。但 resolveTripShortCode() 是先設好邀請狀態、
+    // 才 navigate 到 #/trip/ID，而 #/trip/ 路由的 r.shortCode 永遠是空的，所以邀請狀態每次都被清掉，
+    // 導致持有有效邀請連結的人也只看到「請向統籌人索取邀請連結」。
+    // 改成依 tripId 讀回這台裝置記住的邀請碼：從邀請連結進來就有，直接輸入別的行程 ID 則沒有（不會沿用別的行程的邀請）。
+    const pendingCode = getPendingInvite(r.tripId);
+    state.openedViaInvite = !!pendingCode;
+    state.inviteCode = pendingCode || null;
     await loadTrip(r.tripId);
   }
 
@@ -735,6 +773,9 @@ async function route() {
     renderAccessGate();
     return;
   }
+  // 已是成員：申請畫面用的監聽與暫存邀請都可以收掉了。
+  clearUnsub("myRequest");
+  clearPendingInvite(state.tripId);
   ensureContentSubscriptions();
 
   if (state.tripSection === "expenses") {
@@ -786,6 +827,7 @@ async function resolveTripShortCode(code) {
   }
   state.openedViaInvite = data.type === "tripInvite";
   state.inviteCode = data.type === "tripInvite" ? code : null;
+  if (data.type === "tripInvite") setPendingInvite(data.tripId, code);
   navigate(`#/trip/${data.tripId}`);
 }
 
@@ -916,10 +958,13 @@ async function updateTripMembers(members) {
   });
 }
 
-async function createEditAccessRequest() {
+const ACCESS_REQUEST_NAME_MAX = 20;
+// 回傳 true 代表申請已送出（或已有待審申請）。requestedName 是申請人自己填的名字／暱稱，給統籌人辨識用。
+async function createEditAccessRequest(requestedName) {
   const uid = currentUid();
-  if (!uid || !state.tripId || canEditItinerary()) return;
-  if (isOffline()) { toast("目前離線，請恢復網路後再申請編輯權限"); return; }
+  if (!uid || !state.tripId || canEditItinerary()) return false;
+  if (isOffline()) { toast("目前離線，請恢復網路後再申請"); return false; }
+  const name = String(requestedName || "").trim().slice(0, ACCESS_REQUEST_NAME_MAX);
 
   // 使用申請者 UID 作為文件 ID，避免訪客送出申請前必須查詢整個申請集合。
   // 同一個 UID 在同一個行程中只會有一筆申請資料。
@@ -928,8 +973,8 @@ async function createEditAccessRequest() {
   if (existing.exists()) {
     const data = existing.data();
     if (data.status === "pending") {
-      toast("你已經送出過編輯權限申請，請等待統籌人處理");
-      return;
+      toast("你已經送出過申請，請等待統籌人處理");
+      return true;
     }
   }
 
@@ -943,6 +988,7 @@ async function createEditAccessRequest() {
       status: "pending",
       createdAt: serverTimestamp(),
       inviteCode: state.inviteCode,
+      ...(name ? { requestedName: name } : {}),
     });
   } else {
     await setDoc(requestRef, {
@@ -950,9 +996,11 @@ async function createEditAccessRequest() {
       status: "pending",
       createdAt: serverTimestamp(),
       inviteCode: state.openedViaInvite ? (state.inviteCode || null) : null,
+      ...(name ? { requestedName: name } : {}),
     });
   }
-  toast("已送出編輯權限申請，請通知統籌人審核");
+  toast("已送出申請，請通知統籌人審核");
+  return true;
 }
 
 async function loadAccessRequests() {
@@ -971,6 +1019,8 @@ async function deleteAccessRequests(requestIds) {
   return requestIds.length;
 }
 
+const NEW_MEMBER_EDITOR = "__new_editor__";
+const NEW_MEMBER_VIEWER = "__new_viewer__";
 // options.overrideCap：統籌人在畫面上確認「已達次數上限仍要核准」後，帶 true 重新呼叫一次。
 // 次數上限的判斷與遞增都在同一個 Transaction 內完成（見下方 shortlinkRef／mirrorRef），
 // 避免兩筆申請「同時」被核准時各自依據舊的 usedCount 誤判成「還沒到上限」而一起超額通過。
@@ -1013,12 +1063,24 @@ async function approveAccessRequest(requestId, requestedUid, memberId, { overrid
     }
 
     const latestMembers = (trip.members || []).map((m) => ({ ...m }));
-    const latestTarget = latestMembers.find((m) => m.id === memberId);
-    if (!latestTarget || latestTarget.permission === "owner") throw new Error("找不到可綁定的成員");
-    const uids = memberUids(latestTarget);
-    latestTarget.uids = [...new Set([...uids, requestedUid])];
-    latestTarget.uid = latestTarget.uids[0] || requestedUid;
-    latestTarget.permission = "editor";
+    if (memberId === NEW_MEMBER_EDITOR || memberId === NEW_MEMBER_VIEWER) {
+      // v21p7：直接用申請人填的名字新增一位成員，不必統籌人先手動建好成員再綁定。
+      const newName = String(request.requestedName || "").trim().slice(0, ACCESS_REQUEST_NAME_MAX) || "新成員";
+      latestMembers.push({
+        id: newLocalId(),
+        name: newName,
+        permission: memberId === NEW_MEMBER_VIEWER ? "viewer" : "editor",
+        uid: requestedUid,
+        uids: [requestedUid],
+      });
+    } else {
+      const latestTarget = latestMembers.find((m) => m.id === memberId);
+      if (!latestTarget || latestTarget.permission === "owner") throw new Error("找不到可綁定的成員");
+      const uids = memberUids(latestTarget);
+      latestTarget.uids = [...new Set([...uids, requestedUid])];
+      latestTarget.uid = latestTarget.uids[0] || requestedUid;
+      latestTarget.permission = "editor";
+    }
     const access = {};
     latestMembers.forEach((m) => memberUids(m).forEach((u) => { if (u) access[u] = m.permission; }));
     tx.update(tripRef, { members: latestMembers, access, authModelVersion: 2 });
@@ -1796,11 +1858,12 @@ document.getElementById("show-uid-btn").addEventListener("click", () => {
     }
   };
 });
-document.getElementById("join-trip-btn").addEventListener("click", () => {
+document.getElementById("join-trip-btn").addEventListener("click", openJoinModal);
+function openJoinModal() {
   closeMenu();
-  openModal("用邀請連結加入行程", `
+  openModal("用邀請連結或代碼加入行程", `
     <div class="form-row">
-      <label>貼上統籌人傳給你的邀請連結</label>
+      <label>貼上統籌人傳給你的邀請連結或代碼</label>
       <input type="text" id="join-input" placeholder="https://.../#/s/ABCDEF234567 或 ABCDEF234567">
     </div>
     <div class="form-actions">
@@ -1815,7 +1878,12 @@ document.getElementById("join-trip-btn").addEventListener("click", () => {
     closeModal();
     await handleJoinInput(raw);
   };
-});
+  const joinInput = document.getElementById("join-input");
+  joinInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.isComposing) document.getElementById("join-confirm").click();
+  });
+  joinInput.focus();
+}
 
 async function handleJoinInput(raw) {
   // 完整的舊版行程連結：.../#/trip/xxxxxx（也支援單純貼 Firestore 行程 ID 的舊用法）
@@ -2032,8 +2100,11 @@ function renderWelcome() {
   root.innerHTML = `
     <div class="card" style="text-align:center;padding:36px 20px;">
       <h2 style="margin-top:0;">✈️ 旅行行程規劃工具</h2>
-      <p style="color:var(--text-muted);">建立一個新行程，或從左上角選單切換到你之前建立/加入過的行程。</p>
-      <button id="welcome-new-trip" class="primary-btn" style="margin-top:10px;">＋ 建立新行程</button>
+      <p style="color:var(--text-muted);">建立一個新行程、用統籌人給的邀請連結加入行程，或從左上角選單切換到你之前建立/加入過的行程。</p>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:10px;margin-top:10px;">
+        <button id="welcome-new-trip" class="primary-btn">＋ 建立新行程</button>
+        <button id="welcome-join-trip" class="secondary-btn">🔗 用邀請連結或代碼加入行程</button>
+      </div>
     </div>
     ${trips.length ? `
       <div class="section-title">你最近的行程</div>
@@ -2041,6 +2112,7 @@ function renderWelcome() {
     ` : ""}
   `;
   document.getElementById("welcome-new-trip").addEventListener("click", renderNewTripModal);
+  document.getElementById("welcome-join-trip").addEventListener("click", openJoinModal);
   root.querySelectorAll("[data-tripid]").forEach((el) => {
     el.addEventListener("click", () => navigate(`#/trip/${el.dataset.tripid}`));
   });
@@ -2138,31 +2210,105 @@ function permLabel(p) {
 
 function attachRequestAccessHandler(btn) {
   if (!btn) return;
+  const input = document.getElementById("request-name-input"); // 只有「尚未加入」畫面才有
   btn.onclick = async () => {
+    // 尚未加入的訪客：一定要填名字／暱稱，統籌人才知道是誰。已是唯讀成員：直接帶自己的成員名稱。
+    const name = input ? input.value.trim() : (myMember()?.name || "");
+    if (input && !name) {
+      toast("請先輸入你的名字或暱稱");
+      input.focus();
+      return;
+    }
     try {
       btn.disabled = true;
-      await createEditAccessRequest();
+      await createEditAccessRequest(name);
     } catch (err) {
       console.error(err);
       toast(failMsg("申請送出失敗，請確認 Firebase 規則已更新"));
     }
     btn.disabled = false;
   };
+  if (input) {
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.isComposing) btn.click(); // isComposing：避免中文輸入法選字時的 Enter 誤送出
+    });
+  }
 }
 
 // ------------------------------------------------------------
 // 未綁定成員身份者看到的畫面（不顯示任何天數／景點／記帳內容）
 // ------------------------------------------------------------
+let accessGateSeq = 0;
 function renderAccessGate() {
+  const seq = ++accessGateSeq;
   const root = document.getElementById("app-root");
+  const viaInvite = !!(state.openedViaInvite && state.inviteCode);
   root.innerHTML = `
     <div class="card" style="text-align:center;padding:36px 20px;">
-      <h3 style="margin-top:0;">🔒 尚未綁定此行程的成員身份</h3>
-      <p style="color:var(--text-muted);">你可以透過有效的邀請連結申請加入此行程。為保護成員名單與 UID，未綁定使用者不再直接讀取行程主文件。</p>
-      ${state.openedViaInvite && state.inviteCode ? `<button class="primary-btn" id="request-edit-access-btn">申請加入此行程</button>` : `<p style="margin-bottom:0;color:var(--text-muted);font-size:13px;">請向行程統籌人索取最新邀請連結後再進入。</p>`}
+      <h3 style="margin-top:0;">${viaInvite ? "👋" : "🔒"} 您尚未加入此行程</h3>
+      <p style="color:var(--text-muted);">為保護成員名單與 UID，只有已加入的成員才能查看行程內容。</p>
+      <div id="access-gate-body"></div>
     </div>
   `;
-  attachRequestAccessHandler(document.getElementById("request-edit-access-btn"));
+
+  const nameFormHtml = (note) => `
+    ${note ? `<p style="margin:0 0 6px;">${note}</p>` : ""}
+    <p style="margin:0 0 4px;color:var(--text-muted);font-size:13px;">你是透過邀請連結進來的。請輸入你的名字或暱稱，送出申請後，統籌人核准就能加入。</p>
+    <div style="display:flex;gap:8px;max-width:420px;margin:12px auto 0;">
+      <input type="text" id="request-name-input" maxlength="${ACCESS_REQUEST_NAME_MAX}" placeholder="你的名字或暱稱" autocomplete="nickname" style="flex:1;min-width:0;padding:10px;border:1px solid var(--border);border-radius:8px;">
+      <button class="primary-btn" id="request-edit-access-btn">送出申請</button>
+    </div>`;
+  const noInviteHtml = (note) => `
+    ${note ? `<p style="margin:0 0 6px;">${note}</p>` : ""}
+    <p style="margin:0;color:var(--text-muted);font-size:13px;">加入行程需要統籌人給的邀請連結。收到連結後直接點開，或貼在這裡：</p>
+    <button class="secondary-btn" id="gate-join-btn" style="margin-top:12px;">🔗 用邀請連結或代碼加入行程</button>`;
+
+  const paint = (status, requestedName) => {
+    if (seq !== accessGateSeq) return; // 已經換到別的畫面
+    const body = document.getElementById("access-gate-body");
+    if (!body) return;
+    if (status === "pending") {
+      body.innerHTML = `
+        <p style="margin:0 0 6px;font-size:16px;">✅ 已送出申請${requestedName ? `（${escapeHtml(requestedName)}）` : ""}</p>
+        <p style="margin:0;color:var(--text-muted);font-size:13px;">等統籌人核准後，這個頁面會自動更新，不需要再按任何按鈕。你也可以直接通知統籌人到「管理成員與權限」審核。</p>`;
+      return;
+    }
+    const note = status === "rejected" ? "你先前的申請未獲核准。"
+      : status === "approved" ? "你先前的申請已核准，但目前不在成員名單內。" : "";
+    body.innerHTML = viaInvite ? nameFormHtml(note) : noInviteHtml(note);
+    if (viaInvite) attachRequestAccessHandler(document.getElementById("request-edit-access-btn"));
+    else document.getElementById("gate-join-btn").onclick = openJoinModal;
+  };
+  paint("form");
+
+  // 監聽自己的申請文件：送出後立刻顯示「等待核准」，被核准時自動載入行程。
+  // （Rules 允許本人讀取自己的申請文件，不需要讀取行程主文件。）
+  clearUnsub("myRequest");
+  const uid = currentUid();
+  if (!uid || !state.tripId) return;
+  let sawNotApproved = false; // 只有「看到尚未核准 → 變成核准」才自動重載，避免舊的已核准紀錄造成無限重載
+  state.unsub.myRequest = onSnapshot(
+    doc(db, "trips", state.tripId, "accessRequests", uid),
+    (snap) => {
+      if (seq !== accessGateSeq) return;
+      const d = snap.exists() ? snap.data() : null;
+      const status = d?.status || null;
+      if (status === "approved") {
+        if (sawNotApproved) {
+          clearUnsub("myRequest");
+          toast("統籌人已核准，正在載入行程…");
+          state.tripId = null; // 讓 route() 重新載入行程（此時已有讀取權限）
+          route();
+          return;
+        }
+        paint("approved");
+        return;
+      }
+      sawNotApproved = true;
+      paint(status, d?.requestedName);
+    },
+    (err) => console.warn("[accessGate] 無法監聽申請狀態", err),
+  );
 }
 
 function renderTripDeleted() {
@@ -3764,15 +3910,22 @@ function renderManageMembersModal() {
         // 一律以 approveAccessRequest() 在 Transaction 內重新讀到的最新資料為準。
         const approvedSoFar = link?.usedCount || 0;
         const atCap = link?.maxUses ? approvedSoFar >= link.maxUses : false;
+        const reqName = String(r.requestedName || "").trim();
+        // 申請人填的名字剛好等於某位現有成員時，預先選好那位成員（統籌人仍可改）。
+        const nameMatch = reqName ? candidates.find((m) => String(m.name || "").trim().toLowerCase() === reqName.toLowerCase()) : null;
+        const newLabel = reqName ? `「${escapeHtml(reqName)}」` : "新成員";
         return `
         <div class="card" style="padding:10px;margin-bottom:8px;">
-          <div style="font-size:12px;word-break:break-all;">UID：${escapeHtml(r.requestedUid)}</div>
+          <div style="font-size:14px;font-weight:600;word-break:break-all;">${reqName ? `👤 ${escapeHtml(reqName)}` : "👤 （未填名稱）"}</div>
+          <div style="font-size:12px;word-break:break-all;margin-top:2px;">UID：${escapeHtml(r.requestedUid)}</div>
           ${link ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">來源連結：${escapeHtml(link.label || "（未命名連結）")}${link.maxUses ? `　已核准 ${approvedSoFar} ／ ${link.maxUses} 次` : ""}</div>` : ""}
           ${atCap ? `<div style="font-size:11px;color:var(--danger);margin-top:2px;">⚠️ 這組連結已達你設定的次數上限，核准前會再次跟你確認。</div>` : ""}
           <div style="display:flex;gap:6px;align-items:center;margin-top:8px;">
             <select data-request-member="${r.id}" style="flex:1;padding:8px;border:1px solid var(--border);border-radius:8px;">
               <option value="">選擇要綁定的成員</option>
-              ${candidates.map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)}（${permLabel(m.permission)}）</option>`).join("")}
+              <option value="${NEW_MEMBER_EDITOR}" ${!nameMatch && reqName ? "selected" : ""}>＋ 新增${newLabel}為成員（可編輯）</option>
+              <option value="${NEW_MEMBER_VIEWER}">＋ 新增${newLabel}為成員（唯讀）</option>
+              ${candidates.map((m) => `<option value="${escapeHtml(m.id)}" ${nameMatch && nameMatch.id === m.id ? "selected" : ""}>綁定到既有成員：${escapeHtml(m.name)}（${permLabel(m.permission)}）</option>`).join("")}
             </select>
             <button class="primary-btn small-btn" data-approve-request="${r.id}">核准</button>
             <button class="secondary-btn small-btn" data-reject-request="${r.id}">拒絕</button>
@@ -3788,7 +3941,7 @@ function renderManageMembersModal() {
           try {
             btn.disabled = true;
             await approveAccessRequest(req.id, req.requestedUid, select.value);
-            toast("已核准編輯權限，請通知對方重新整理");
+            toast("已核准。對方的畫面會自動更新，若沒有請請對方重新整理");
             closeModal();
           } catch (err) {
             // 次數上限的判斷在 Transaction 內用最新資料重新核對，這裡才是唯一可信的「已達上限」時機；
@@ -3798,7 +3951,7 @@ function renderManageMembersModal() {
               if (wantsOverride) {
                 try {
                   await approveAccessRequest(req.id, req.requestedUid, select.value, { overrideCap: true });
-                  toast("已核准編輯權限，請通知對方重新整理");
+                  toast("已核准。對方的畫面會自動更新，若沒有請請對方重新整理");
                   closeModal();
                   return;
                 } catch (err2) {
