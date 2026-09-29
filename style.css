@@ -709,3 +709,24 @@ h1, h2, h3 { font-family: var(--font-heading); }
   outline: 2px dashed var(--accent, #4f46e5);
   outline-offset: 2px;
 }
+
+/* ---- v21p6：離線與同步 ---- */
+.sync-pill {
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.sync-pill.sync-warn { background: var(--danger-bg); color: var(--danger); border-color: var(--danger); }
+.offline-status { display: grid; gap: 6px; padding: 10px 12px; margin-bottom: 12px; background: var(--bg); border-radius: var(--radius-sm); font-size: 14px; line-height: 1.5; }
+.offline-actions { display: grid; gap: 8px; }
+.offline-note { font-size: 12.5px; color: var(--text-muted); line-height: 1.5; }
+.offline-help { margin-top: 12px; font-size: 13.5px; }
+.offline-help summary { cursor: pointer; font-weight: 700; }
+.offline-help ul { padding-left: 18px; margin: 8px 0 0; display: grid; gap: 6px; line-height: 1.55; }
+.offline-danger { margin-top: 16px; padding-top: 12px; border-top: 1px dashed var(--border); display: grid; gap: 6px; justify-items: start; }
