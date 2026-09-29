@@ -42,7 +42,7 @@ if (window.top !== window.self) {
         showError("⚠️ Promise 初始化錯誤", event ? event.reason : null);
       });
 
-      import("./app.js?v=21p5").catch(function (err) {
+      import("./app.js?v=21p6").catch(function (err) {
         showError("⚠️ 網站程式載入失敗", err);
       });
 
@@ -52,3 +52,13 @@ if (window.top !== window.self) {
         }
       }, 10000);
     }());
+
+// v21p6：註冊 Service Worker，讓網站本身（HTML／JS／CSS／Firebase 模組）斷網時也能打開。
+// 註冊失敗不影響網站正常運作（只是沒有離線開啟功能）。管理後台（admin.html）不受影響、不會被快取。
+if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1")) {
+  window.addEventListener("load", function () {
+    navigator.serviceWorker.register("sw.js").catch(function (err) {
+      console.warn("[sw] 註冊失敗（不影響一般使用）", err);
+    });
+  });
+}
