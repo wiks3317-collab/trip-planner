@@ -41,6 +41,12 @@ function resolveMapHref(linkValue, addressValue, fallbackText) {
   return normalizeMapLink(linkValue) || mapSearchLink(addressValue) || mapSearchLink(fallbackText);
 }
 
+// v21p5：CSP 不允許內嵌 onclick，原本 readonly 輸入框的「點一下全選」改成全站事件委派。
+document.addEventListener("click", (e) => {
+  const el = e.target;
+  if (el && el.tagName === "INPUT" && el.readOnly && typeof el.select === "function") el.select();
+});
+
 function newLocalId() {
   return doc(collection(db, "_ids")).id;
 }
@@ -654,6 +660,17 @@ async function loadAccessRequests() {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }
 
+// v21p5：批次刪除申請紀錄（統籌人專用）。每批 200 筆；不影響已寫入 trips.access 的成員身份。
+async function deleteAccessRequests(requestIds) {
+  if (!state.tripId || !requestIds.length) return 0;
+  for (let i = 0; i < requestIds.length; i += 200) {
+    const batch = writeBatch(db);
+    requestIds.slice(i, i + 200).forEach((id) => batch.delete(doc(db, "trips", state.tripId, "accessRequests", id)));
+    await batch.commit();
+  }
+  return requestIds.length;
+}
+
 // options.overrideCap：統籌人在畫面上確認「已達次數上限仍要核准」後，帶 true 重新呼叫一次。
 // 次數上限的判斷與遞增都在同一個 Transaction 內完成（見下方 shortlinkRef／mirrorRef），
 // 避免兩筆申請「同時」被核准時各自依據舊的 usedCount 誤判成「還沒到上限」而一起超額通過。
@@ -1169,6 +1186,7 @@ async function renderShareTripModal() {
 
   openModal("分享此行程", `
     <p style="font-size:13px;color:var(--text-muted);margin-top:0;">把邀請連結傳給同行的人。對方打開後需先申請加入，經你核准並綁定成員身份後，才能看到行程內容。</p>
+    <p style="font-size:12px;color:var(--danger);margin-top:-4px;">🔑 邀請連結就像鑰匙：知道連結的人都能送出加入申請。請只傳給要邀請的人；若不慎外流，請立即到「設定到期時間／刪除連結」撤銷並重建。</p>
     ${active.length ? active.map((l) => {
       const url = inviteUrlOf(l.id);
       const expiry = l.expiresAt ? `到期：${toDatetimeLocalValue(l.expiresAt).replace("T", " ")}` : "永久有效";
@@ -1178,7 +1196,7 @@ async function renderShareTripModal() {
             <strong style="font-size:13px;">${escapeHtml(l.label || "（未命名連結）")}</strong>
             <span style="font-size:12px;color:var(--text-muted);">${escapeHtml(expiry)}</span>
           </div>
-          <input type="text" readonly value="${escapeHtml(url)}" onclick="this.select()" style="width:100%;margin-top:6px;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
+          <input type="text" readonly value="${escapeHtml(url)}" style="width:100%;margin-top:6px;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;">
           <button class="secondary-btn full-width copy-share-invite-btn" data-url="${escapeHtml(url)}" style="margin-top:8px;">📋 複製邀請連結</button>
         </div>`;
     }).join("") : `<p style="font-size:13px;color:var(--text-muted);">目前沒有可用的邀請連結，請先建立一組。</p>`}
@@ -1369,7 +1387,8 @@ document.getElementById("show-uid-btn").addEventListener("click", () => {
   if (!uid) return toast("目前尚未取得 Firebase UID");
   openModal("目前裝置 UID", `
     <p style="font-size:13px;color:var(--text-muted);margin-top:0;">這是這台裝置／瀏覽器的匿名識別碼。若統籌人需要手動幫你綁定成員身份，把下面這串傳給統籌人即可。</p>
-    <div class="form-row"><input type="text" id="device-uid-input" readonly value="${escapeHtml(uid)}" onclick="this.select()"></div>
+    <p style="font-size:12px;color:var(--text-muted);">UID 只是識別碼、不是密碼，別人拿到也無法登入你的身份；但它能用來辨認你的裝置，建議只傳給統籌人，不要公開貼出（例如社群、公開群組截圖）。</p>
+    <div class="form-row"><input type="text" id="device-uid-input" readonly value="${escapeHtml(uid)}"></div>
     <div class="form-actions">
       <button class="secondary-btn" id="uid-close-btn">關閉</button>
       <button class="primary-btn" id="uid-copy-btn">複製 UID</button>
@@ -1565,15 +1584,16 @@ async function renderSyncDevicesModal() {
     <p style="font-size:13px;color:var(--text-muted);margin-top:0;">
       在這台裝置上，把下面的短連結或代碼傳給你自己（例如用 LINE「傳給自己」），在另一台裝置打開連結、或在下方貼上代碼匯入，就能把目前的 ${trips.length} 個行程一次加進那台裝置的清單。
     </p>
+    <p style="font-size:12px;color:var(--text-muted);margin-top:-4px;">同步內容只有行程 ID 清單，不含登入憑證，也不會讓對方直接看到行程內容；但仍建議只傳給自己，不要公開貼出。</p>
     <div class="form-row">
       <label>同步連結</label>
-      <input type="text" id="sync-link" readonly value="${escapeHtml(link)}" onclick="this.select()">
+      <input type="text" id="sync-link" readonly value="${escapeHtml(link)}">
     </div>
     <button class="secondary-btn full-width" id="copy-sync-link-btn">📋 複製連結</button>
 
     <div class="form-row" style="margin-top:14px;">
       <label>同步代碼</label>
-      <input type="text" id="sync-code" readonly value="${escapeHtml(code)}" onclick="this.select()" style="font-size:20px;letter-spacing:3px;text-align:center;font-weight:700;">
+      <input type="text" id="sync-code" readonly value="${escapeHtml(code)}" style="font-size:20px;letter-spacing:3px;text-align:center;font-weight:700;">
     </div>
     <button class="secondary-btn full-width" id="copy-sync-code-btn">📋 複製代碼</button>
 
@@ -3298,15 +3318,43 @@ function renderManageMembersModal() {
     const wrap = document.getElementById("access-requests-wrap");
     try {
       const allRequests = await loadAccessRequests();
-      const requests = allRequests.filter((r) => r.status === "pending");
+      const tsOf = (r) => (r.createdAt && r.createdAt.seconds) || 0;
+      const requests = allRequests.filter((r) => r.status === "pending").sort((x, y) => tsOf(y) - tsOf(x));
+      const closedRequests = allRequests.filter((r) => r.status !== "pending");
+      // v21p5：待審清單最多顯示最新 20 筆，避免被灌爆時畫面卡死；並提供清理按鈕。
+      const SHOW_MAX = 20;
+      const shownRequests = requests.slice(0, SHOW_MAX);
+      const cleanupBarHtml = (requests.length || closedRequests.length) ? `
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
+          ${closedRequests.length ? `<button class="secondary-btn small-btn" data-purge-closed>🧹 清除已結案申請（${closedRequests.length}）</button>` : ""}
+          ${requests.length > 1 ? `<button class="secondary-btn small-btn" data-purge-pending style="color:var(--danger);">🗑️ 清除全部待審申請（${requests.length}）</button>` : ""}
+        </div>
+        ${requests.length > SHOW_MAX ? `<p style="font-size:12px;color:var(--danger);margin:0 0 8px;">⚠️ 待審申請共 ${requests.length} 筆，只顯示最新 ${SHOW_MAX} 筆。若不是預期中的人數，可能有人濫用邀請連結，建議撤銷該連結並清除待審申請。</p>` : ""}` : "";
+      const bindCleanup = () => {
+        const run = async (ids, label) => {
+          try {
+            await deleteAccessRequests(ids);
+            toast(`已清除 ${ids.length} 筆${label}`);
+            closeModal();
+          } catch (err) {
+            console.error(err);
+            toast("清除失敗，請確認 Firestore Rules 已更新到 v21p5");
+          }
+        };
+        const closedBtn = wrap.querySelector("[data-purge-closed]");
+        const pendingBtn = wrap.querySelector("[data-purge-pending]");
+        if (closedBtn) closedBtn.onclick = () => { if (confirm(`確定清除 ${closedRequests.length} 筆已結案（已核准／已拒絕）的申請紀錄嗎？不會影響已加入的成員。`)) run(closedRequests.map((r) => r.id), "已結案申請"); };
+        if (pendingBtn) pendingBtn.onclick = () => { if (confirm(`確定清除全部 ${requests.length} 筆待審申請嗎？被清除的人需要重新申請。`)) run(requests.map((r) => r.id), "待審申請"); };
+      };
       if (!requests.length) {
-        wrap.innerHTML = `<p style="color:var(--text-muted);font-size:13px;">目前沒有待審核申請。</p>`;
+        wrap.innerHTML = cleanupBarHtml + `<p style="color:var(--text-muted);font-size:13px;">目前沒有待審核申請。</p>`;
+        bindCleanup();
         return;
       }
       const links = (await loadInviteLinks()) || [];
       const linkByCode = Object.fromEntries(links.map((l) => [l.id, l]));
       const candidates = members.filter((m) => m.permission !== "owner");
-      wrap.innerHTML = requests.map((r) => {
+      wrap.innerHTML = cleanupBarHtml + shownRequests.map((r) => {
         const link = r.inviteCode ? linkByCode[r.inviteCode] : null;
         // 顯示用：讀 usedCount（已用 Transaction 原子維護），僅供參考；核准當下是否真的達到上限，
         // 一律以 approveAccessRequest() 在 Transaction 內重新讀到的最新資料為準。
@@ -3327,6 +3375,7 @@ function renderManageMembersModal() {
           </div>
         </div>`;
       }).join("");
+      bindCleanup();
       wrap.querySelectorAll("[data-approve-request]").forEach((btn) => {
         btn.onclick = async () => {
           const req = requests.find((r) => r.id === btn.dataset.approveRequest);
