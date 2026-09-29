@@ -2,6 +2,8 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="UTF-8" />
+<!-- v21p5：CSP 縱深防禦。若日後新增外部資源被擋，請看瀏覽器主控台的 CSP 錯誤並在此放行；緊急時可整行移除。 -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.gstatic.com https://apis.google.com https://www.google.com/recaptcha/; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://cdn.jsdelivr.net https://*.currency-api.pages.dev https://www.google.com; frame-src https://www.google.com https://recaptcha.google.com https://*.firebaseapp.com https://accounts.google.com; object-src 'none'; base-uri 'self'; form-action 'self'" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />
 <meta name="googlebot" content="noindex, nofollow, noarchive, nosnippet" />
@@ -122,6 +124,6 @@
 </head>
 <body>
   <div id="admin-root"></div>
-  <script type="module" src="admin.js?v=21p2" onerror="document.getElementById('admin-root').innerHTML='<div class=\"admin-card\"><h1>管理後台載入失敗</h1><p class=\"admin-muted\">管理程式載入失敗，請重新整理頁面；若仍發生，請確認 GitHub Pages 已部署最新 v21p2 檔案。</p></div>'"></script>
+  <script src="admin-boot.js?v=21p5"></script>
 </body>
 </html>
