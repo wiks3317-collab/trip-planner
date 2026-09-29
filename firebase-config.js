@@ -14,9 +14,17 @@ import {
   onAuthStateChanged,
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
 
-import { firebaseConfig } from "./firebase-options.js"; // 設定值集中在 firebase-options.js
+import { initializeAppCheck, ReCaptchaV3Provider } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app-check.js";
+import { firebaseConfig, appCheckSiteKey } from "./firebase-options.js"; // 設定值集中在 firebase-options.js
 
 const app = initializeApp(firebaseConfig);
+
+// v21p5：App Check。必須在 getFirestore／getAuth 之前初始化。
+// 金鑰留空時完全略過，不影響現有功能；本機開發（localhost）自動使用 debug token。
+if (appCheckSiteKey) {
+  if (["localhost", "127.0.0.1"].includes(location.hostname)) self.FIREBASE_APPCHECK_DEBUG_TOKEN = true;
+  initializeAppCheck(app, { provider: new ReCaptchaV3Provider(appCheckSiteKey), isTokenAutoRefreshEnabled: true });
+}
 const db = getFirestore(app);
 const auth = getAuth(app);
 
