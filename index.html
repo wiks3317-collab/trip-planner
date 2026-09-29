@@ -5,6 +5,10 @@
 <!-- v21p5：CSP 縱深防禦。若日後新增外部資源被擋，請看瀏覽器主控台的 CSP 錯誤並在此放行；緊急時可整行移除。 -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.gstatic.com https://apis.google.com https://www.google.com/recaptcha/; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://cdn.jsdelivr.net https://*.currency-api.pages.dev https://www.google.com; frame-src https://www.google.com https://recaptcha.google.com https://*.firebaseapp.com https://accounts.google.com; object-src 'none'; base-uri 'self'; form-action 'self'" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<!-- v21p6：離線支援（PWA）。manifest 讓手機可「加到主畫面」；sw.js 讓網站本身在斷網時也能打開。 -->
+<link rel="manifest" href="manifest.webmanifest" />
+<meta name="theme-color" content="#0E6B64" />
+<link rel="apple-touch-icon" href="icon-192.png" />
 <!-- 不讓搜尋引擎收錄本站（Google、Bing 等都會遵守） -->
 <meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />
 <meta name="googlebot" content="noindex, nofollow, noarchive, nosnippet" />
@@ -27,6 +31,7 @@
       <button id="rename-trip-btn" class="icon-btn hidden" title="重新命名行程" style="font-size:13px;">✏️</button>
     </div>
     <div id="header-actions">
+      <button id="sync-status-btn" class="sync-pill hidden" title="離線與同步狀態"></button>
       <button id="current-member-badge" class="hidden" title="目前身份"></button>
       <button id="appearance-btn" class="icon-btn" title="外觀設定">🎨</button>
       <button id="share-btn" class="icon-btn hidden" title="分享此行程">🔗</button>
@@ -45,6 +50,7 @@
     <div class="menu-footer">
       <button id="join-trip-btn" class="secondary-btn full-width">用邀請連結加入行程</button>
       <button id="sync-devices-btn" class="secondary-btn full-width" style="margin-top:8px;">🔄 跨裝置同步清單</button>
+      <button id="offline-panel-btn" class="secondary-btn full-width" style="margin-top:8px;">📴 離線與同步</button>
       <button id="show-uid-btn" class="secondary-btn full-width" style="margin-top:8px;">🪪 顯示目前裝置 UID</button>
       <a id="admin-link-btn" href="admin.html" target="_blank" rel="noopener" class="secondary-btn full-width" style="display:block;box-sizing:border-box;margin-top:8px;text-align:center;text-decoration:none;">🛠️ 管理員後台</a>
     </div>
@@ -76,6 +82,6 @@
   <!-- Toast 提示 -->
   <div id="toast-container"></div>
 
-  <script src="boot.js?v=21p5"></script>
+  <script src="boot.js?v=21p6"></script>
 </body>
 </html>
