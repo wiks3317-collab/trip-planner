@@ -11,4 +11,4 @@ export const firebaseConfig = {
 
 // Firebase App Check（reCAPTCHA v3）網站金鑰。留空 = 不啟用（網站照常運作）。
 // 設定步驟見 README「v21p5 安全補強：App Check」。這是「網站金鑰」，本來就可公開，不是密鑰。
-export const appCheckSiteKey = "";
+export const appCheckSiteKey = "6Ld-zdQtAAAAABBm3ciF-E47e1j7KNmYtZnChFd8";
