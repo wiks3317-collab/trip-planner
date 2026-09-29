@@ -3,11 +3,277 @@
 // 純前端 + Firebase Firestore（即時同步資料庫）
 // ============================================================
 
-import { db, auth, authReady } from "./firebase-config.js";
+import { db, auth, authReady, offlineCacheMode } from "./firebase-config.js";
 import {
-  collection, doc, getDoc, getDocs, setDoc, addDoc, updateDoc, deleteDoc,
-  onSnapshot, query, orderBy, serverTimestamp, writeBatch, runTransaction, Timestamp,
+  collection, doc, getDoc, getDocFromCache, getDocs,
+  setDoc as rawSetDoc, updateDoc as rawUpdateDoc, deleteDoc as rawDeleteDoc,
+  onSnapshot, query, orderBy, serverTimestamp, writeBatch as rawWriteBatch, runTransaction, Timestamp,
+  enableNetwork, disableNetwork, waitForPendingWrites, terminate, clearIndexedDbPersistence,
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+
+// ------------------------------------------------------------
+// v21p6：離線與同步
+//
+// 運作方式：
+//  1. firebase-config.js 啟用了 Firestore 本機快取（IndexedDB）。離線時讀取走本機快取；
+//     寫入（新增／修改／刪除）會先套用在這台裝置的畫面上，並排進佇列，恢復網路後 Firestore 自動上傳。
+//  2. Firestore 的寫入 Promise 要等「伺服器確認」才會完成，離線時會一直卡住，
+//     導致原本「await 寫入 → 關視窗」的畫面停在那裡。所以這裡把 setDoc／updateDoc／deleteDoc／addDoc／writeBatch
+//     包成 optimistic 版本：伺服器很快回應就照舊；離線或超過寬限時間就先放行，背景繼續等，
+//     之後若被伺服器拒絕（例如權限已變更），會跳出警示。
+//  3. 必須即時確認的操作（邀請連結、同步碼）改用 raw 版本，離線時直接告知「需要網路」，不會排隊。
+// ------------------------------------------------------------
+const LS_MANUAL_OFFLINE = "tp_manual_offline"; // 手動「離線模式」（訊號很差時，讓網站不要一直等網路）
+const LS_OFFLINE_DL = "tp_offline_downloads";  // { [tripId]: { at, days, spots, wishes, expenses } }
+const OFFLINE_GRACE_MS = 1500;                  // 線上時，寫入超過這段時間沒回應就先放行畫面
+const STRICT_TIMEOUT_MS = 12000;                // 需要即時確認的寫入，最多等這麼久
+const SNAP_OPTS = { serverTimestamps: "estimate" }; // 離線新增的資料，時間欄位先用本機時間估算，畫面才不會空白
+
+const sync = {
+  manualOffline: false,   // 使用者手動開啟離線模式
+  serverUnreachable: false, // 連得上網路但連不到 Firestore（由行程監聽的 fromCache 狀態判斷）
+  hasPending: false,      // 是否還有尚未上傳的變更
+  pendingSince: 0,
+  announceSynced: false,  // 離線期間累積過變更 → 上傳完成時提示一次
+  failedCount: 0,         // 被伺服器拒絕的變更筆數（本次開啟期間）
+  cacheMode: offlineCacheMode,
+};
+try { sync.manualOffline = localStorage.getItem(LS_MANUAL_OFFLINE) === "1"; } catch { /* 無痕模式可能不能用 localStorage */ }
+
+function isOffline() {
+  return sync.manualOffline || sync.serverUnreachable || navigator.onLine === false;
+}
+function failMsg(defaultMsg) {
+  return isOffline() ? "目前離線，這個操作需要網路連線，請恢復網路後再試" : defaultMsg;
+}
+function withTimeout(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => { const e = new Error("timeout"); e.code = "timeout"; reject(e); }, ms);
+    promise.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+  });
+}
+function offlineError(msg) {
+  const e = new Error(msg || "目前離線，這個操作需要網路連線");
+  e.code = "offline";
+  return e;
+}
+
+// 寫入 Promise 的「離線友善」包裝：伺服器確認 → 完成；離線或超過寬限時間 → 先放行（value），背景繼續追蹤
+function optimistic(promise, value) {
+  markPending();
+  return new Promise((resolve, reject) => {
+    let released = false;
+    const release = () => { if (!released) { released = true; resolve(value); } };
+    const timer = setTimeout(release, isOffline() ? 0 : OFFLINE_GRACE_MS);
+    promise.then(
+      () => { clearTimeout(timer); release(); checkPending(); },
+      (err) => {
+        clearTimeout(timer);
+        if (!released) { released = true; reject(err); } // 寬限時間內就被拒絕：照原本流程丟給呼叫端處理
+        else reportBackgroundWriteFailure(err);           // 已經放行才被拒絕：跳警示
+        checkPending();
+      },
+    );
+  });
+}
+function setDoc(ref, data, options) { return optimistic(options ? rawSetDoc(ref, data, options) : rawSetDoc(ref, data)); }
+function updateDoc(ref, ...args) { return optimistic(rawUpdateDoc(ref, ...args)); }
+function deleteDoc(ref) { return optimistic(rawDeleteDoc(ref)); }
+// addDoc 改成「先在本機產生文件 ID 再 setDoc」，離線時也能立刻拿到 ref.id
+function addDoc(colRef, data) {
+  const ref = doc(colRef);
+  return optimistic(rawSetDoc(ref, data), ref);
+}
+function writeBatch(dbArg) {
+  const batch = rawWriteBatch(dbArg);
+  const commit = batch.commit.bind(batch);
+  batch.commit = () => optimistic(commit());
+  return batch;
+}
+
+let pendingToken = 0;
+function markPending() {
+  if (!sync.hasPending) sync.pendingSince = Date.now();
+  sync.hasPending = true;
+  if (isOffline()) sync.announceSynced = true;
+  updateSyncBadge();
+  setTimeout(updateSyncBadge, 2600); // 待同步超過 2.5 秒才顯示，避免每次儲存都閃一下
+}
+// 查詢「所有排隊中的寫入是否都已上傳」。沒有排隊時 waitForPendingWrites 會立刻完成。
+function checkPending() {
+  const token = ++pendingToken;
+  let done = false;
+  waitForPendingWrites(db).then(() => {
+    done = true;
+    if (token !== pendingToken) return;
+    sync.hasPending = false;
+    sync.pendingSince = 0;
+    if (sync.announceSynced) {
+      sync.announceSynced = false;
+      toast("✅ 離線期間的變更已同步到雲端，其他人現在看得到了");
+    }
+    updateSyncBadge();
+  }, () => { /* 網路被停用或已終止：維持待同步狀態 */ });
+  setTimeout(() => {
+    if (!done && token === pendingToken) {
+      if (!sync.hasPending) sync.pendingSince = Date.now();
+      sync.hasPending = true; // 重新開啟網站時，上次遺留的排隊變更也會在這裡被發現
+      updateSyncBadge();
+    }
+  }, 400);
+}
+
+// 由行程主文件監聽的 metadata 判斷伺服器連線狀態：fromCache 持續為 true 代表連不上伺服器
+let unreachableTimer = null;
+function noteServerState(fromCache) {
+  if (!fromCache) {
+    clearTimeout(unreachableTimer);
+    unreachableTimer = null;
+    if (sync.serverUnreachable) {
+      sync.serverUnreachable = false;
+      toast(sync.hasPending ? "已恢復連線，正在同步離線期間的變更…" : "已恢復連線");
+      checkPending();
+    }
+    updateSyncBadge();
+    return;
+  }
+  if (!unreachableTimer && !sync.serverUnreachable) {
+    unreachableTimer = setTimeout(() => {
+      unreachableTimer = null;
+      sync.serverUnreachable = true;
+      updateSyncBadge();
+    }, 4000);
+  }
+}
+
+function reportBackgroundWriteFailure(err) {
+  sync.failedCount++;
+  console.error("[sync] 有一筆變更上傳失敗", err);
+  toast(err && err.code === "permission-denied"
+    ? "⚠️ 有一筆離線期間的變更被伺服器拒絕（可能權限已變更或行程已停用），畫面已還原"
+    : "⚠️ 有一筆變更上傳失敗，畫面可能已還原，請確認內容");
+  updateSyncBadge();
+}
+
+function syncStatus() {
+  if (sync.manualOffline) return "manual";
+  if (isOffline()) return "offline";
+  if (sync.hasPending && Date.now() - sync.pendingSince > 2500) return "pending";
+  return "ok";
+}
+function updateSyncBadge() {
+  const btn = document.getElementById("sync-status-btn");
+  if (btn) {
+    const st = syncStatus();
+    let text = "";
+    if (st === "manual") text = "📴 離線模式";
+    else if (st === "offline") text = sync.hasPending ? "📴 離線・待同步" : "📴 離線";
+    else if (st === "pending") text = "🔄 同步中";
+    else if (sync.failedCount > 0) text = "⚠️ 有變更未同步";
+    btn.textContent = text;
+    btn.classList.toggle("hidden", !text);
+    btn.classList.toggle("sync-warn", st === "ok" && sync.failedCount > 0);
+  }
+  const panel = document.getElementById("offline-panel-status");
+  if (panel) panel.innerHTML = offlineStatusHtml();
+}
+function offlineStatusHtml() {
+  const st = syncStatus();
+  const lines = [];
+  if (st === "manual") lines.push("📴 <b>離線模式已開啟</b>：網站不會等網路，所有修改先存在這台裝置。");
+  else if (st === "offline") lines.push("📴 <b>目前離線或連不上伺服器</b>：可以照常查看與編輯，變更會先存在這台裝置。");
+  else lines.push("🟢 <b>連線正常</b>");
+  if (sync.hasPending) lines.push("🔄 有變更尚未上傳到雲端" + (st === "ok" || st === "pending" ? "，正在同步…" : "，恢復網路後會自動上傳。"));
+  else lines.push("☁️ 所有變更都已同步到雲端");
+  if (sync.failedCount > 0) lines.push(`⚠️ 本次有 ${sync.failedCount} 筆變更被伺服器拒絕（畫面已還原），請檢查內容是否正確。`);
+  if (sync.cacheMode !== "persistent") lines.push("⚠️ 這個瀏覽器無法在本機保存離線資料（可能是無痕模式），關閉頁面後離線資料會消失。");
+  return lines.map((l) => `<div>${l}</div>`).join("");
+}
+
+window.addEventListener("online", () => { checkPending(); updateSyncBadge(); });
+window.addEventListener("offline", updateSyncBadge);
+
+async function setManualOffline(on) {
+  sync.manualOffline = !!on;
+  try { localStorage.setItem(LS_MANUAL_OFFLINE, on ? "1" : "0"); } catch { /* ignore */ }
+  try {
+    if (on) await disableNetwork(db);
+    else await enableNetwork(db);
+  } catch (err) {
+    console.error("[sync] 切換離線模式失敗", err);
+  }
+  if (!on) { checkPending(); toast("已結束離線模式，正在連線並同步…"); }
+  else toast("已開啟離線模式：修改會先存在這台裝置");
+  updateSyncBadge();
+}
+async function syncNow() {
+  if (sync.manualOffline) await setManualOffline(false);
+  toast("正在同步…");
+  try {
+    await withTimeout(waitForPendingWrites(db), 15000);
+    sync.hasPending = false;
+    sync.pendingSince = 0;
+    sync.announceSynced = false;
+    updateSyncBadge();
+    toast("✅ 已同步到雲端");
+  } catch {
+    toast("目前連不上伺服器，變更仍保留在這台裝置，恢復網路後會自動重試");
+  }
+}
+
+function getOfflineDownloads() {
+  try { return JSON.parse(localStorage.getItem(LS_OFFLINE_DL) || "{}") || {}; } catch { return {}; }
+}
+function hasOfflineDownload(tripId) {
+  return !!(tripId && getOfflineDownloads()[tripId]);
+}
+// 離線時，會「先讀資料再決定怎麼寫」的操作（刪除整天、刪除景點、搬移／複製景點）
+// 只有在這個行程已完整下載過才允許，避免快取不完整而漏刪、漏搬留言。
+function ensureCacheComplete(actionLabel) {
+  if (!isOffline()) return true;
+  if (state.tripId && hasOfflineDownload(state.tripId)) return true;
+  toast(`離線時要先在有網路時按「離線與同步 → 下載此行程」，才能${actionLabel}`);
+  return false;
+}
+
+// 把整個行程（所有天數、景點、留言、記帳）讀一遍，讓它們都進本機快取
+async function downloadTripForOffline(onProgress) {
+  const tid = state.tripId;
+  const stats = { days: 0, spots: 0, wishes: 0, expenses: 0 };
+  const daysSnap = await getDocs(query(collection(db, "trips", tid, "days"), orderBy("order", "asc")));
+  stats.days = daysSnap.size;
+  onProgress(stats);
+  for (const d of daysSnap.docs) {
+    const spotsSnap = await getDocs(query(collection(db, "trips", tid, "days", d.id, "spots"), orderBy("order", "asc")));
+    stats.spots += spotsSnap.size;
+    onProgress(stats);
+    const spotDocs = spotsSnap.docs;
+    for (let i = 0; i < spotDocs.length; i += 5) {
+      const results = await Promise.all(spotDocs.slice(i, i + 5).map((sp) =>
+        getDocs(collection(db, "trips", tid, "days", d.id, "spots", sp.id, "wishes"))));
+      results.forEach((r) => { stats.wishes += r.size; });
+      onProgress(stats);
+    }
+  }
+  const expSnap = await getDocs(query(collection(db, "trips", tid, "expenses"), orderBy("date", "asc")));
+  stats.expenses = expSnap.size;
+  onProgress(stats);
+  const all = getOfflineDownloads();
+  all[tid] = { at: Date.now(), ...stats };
+  try { localStorage.setItem(LS_OFFLINE_DL, JSON.stringify(all)); } catch { /* ignore */ }
+  return stats;
+}
+
+async function clearLocalOfflineData() {
+  try {
+    await terminate(db);
+    await clearIndexedDbPersistence(db);
+  } catch (err) {
+    console.error("[sync] 清除本機離線資料失敗", err);
+  }
+  try { localStorage.removeItem(LS_OFFLINE_DL); } catch { /* ignore */ }
+  location.reload();
+}
 
 // ------------------------------------------------------------
 // 小工具
@@ -500,6 +766,11 @@ function stopContentSubscriptions() {
 }
 
 async function resolveTripShortCode(code) {
+  if (isOffline()) {
+    toast("目前離線，無法解析邀請連結。請恢復網路後再開一次；已加入的行程可從左上角選單直接開啟");
+    navigate("");
+    return;
+  }
   renderLoading();
   const data = await getShortlinkData(code);
   if (!data || !["trip", "tripInvite"].includes(data.type) || !data.tripId) {
@@ -532,38 +803,65 @@ async function loadTrip(tripId) {
   renderLoading();
 
   const tripRef = doc(db, "trips", tripId);
-  let snap;
-  try {
-    snap = await getDoc(tripRef);
-  } catch (err) {
-    if (err?.code === "permission-denied") {
-      stopContentSubscriptions();
-      hideSpotPanel();
-      renderAccessGate();
+  // v21p6：先讀本機快取（離線或訊號差時立刻能打開）；快取沒有才問伺服器。
+  // 之後的即時監聽（onSnapshot）會用伺服器上的最新內容接手更新。
+  let snap = null;
+  try { snap = await getDocFromCache(tripRef); } catch { snap = null; }
+  if (!snap || !snap.exists()) {
+    try {
+      snap = await getDoc(tripRef);
+    } catch (err) {
+      if (err?.code === "permission-denied") {
+        stopContentSubscriptions();
+        hideSpotPanel();
+        renderAccessGate();
+        return;
+      }
+      console.error("[trip] 載入行程失敗", err);
+      if (err?.code === "unavailable" || isOffline()) {
+        toast("目前離線，而且這台裝置還沒有這個行程的離線資料。請先連上網路開啟一次，再到選單「離線與同步」下載");
+      } else {
+        toast("行程載入失敗，請稍後再試");
+      }
+      navigate("");
       return;
     }
-    console.error("[trip] 載入行程失敗", err);
-    toast("行程載入失敗，請稍後再試");
-    navigate("");
-    return;
   }
   if (!snap.exists()) {
     toast("找不到這個行程，連結可能有誤");
     navigate("");
     return;
   }
-  state.trip = { id: tripId, ...snap.data() };
+  state.trip = { id: tripId, ...snap.data(SNAP_OPTS) };
   saveMyTrip(tripId, state.trip.name);
   applyTripBackground(state.trip.backgroundImageUrl, state.trip.backgroundDim);
 
-  state.unsub.trip = onSnapshot(tripRef, (s) => {
+  // includeMetadataChanges：為了知道目前是「來自本機快取」還是「伺服器最新資料」（判斷是否離線）。
+  // 只有 metadata 變動、內容沒變時，不重新渲染畫面。
+  const tripSig = (o) => { try { return JSON.stringify(o); } catch { return String(Math.random()); } };
+  let lastTripSig = tripSig(snap.data(SNAP_OPTS));
+  state.unsub.trip = onSnapshot(tripRef, { includeMetadataChanges: true }, (s) => {
+    noteServerState(s.metadata.fromCache);
     if (!s.exists()) return;
-    state.trip = { id: tripId, ...s.data() };
+    const data = s.data(SNAP_OPTS);
+    const sig = tripSig(data);
+    if (sig === lastTripSig) return;
+    lastTripSig = sig;
+    state.trip = { id: tripId, ...data };
     updateMyTripName(tripId, state.trip.name);
     applyTripBackground(state.trip.backgroundImageUrl, state.trip.backgroundDim);
     updateHeader();
     // 若目前畫面跟成員/權限有關，重新渲染目前頁面
     route();
+  }, (err) => {
+    // 例如：這台裝置上的舊快取還在，但伺服器已確認你不再是成員
+    if (err?.code === "permission-denied") {
+      stopContentSubscriptions();
+      hideSpotPanel();
+      renderAccessGate();
+      return;
+    }
+    console.error("[trip] 行程即時同步中斷", err);
   });
   // 天數等內容的訂閱改由 route() 依「是否已綁定成員身份」決定
 }
@@ -595,6 +893,7 @@ async function createTrip(name, members) {
 }
 
 async function updateTripMembers(members) {
+  if (isOffline()) throw new Error("目前離線，管理成員與權限需要網路連線，請恢復網路後再儲存");
   const normalizedMembers = members.map((m) => ({ ...m, uids: memberUids(m) }));
   const ownerUid = state.trip?.ownerUid || currentUid();
   const owners = normalizedMembers.filter((m) => m.permission === "owner");
@@ -620,6 +919,7 @@ async function updateTripMembers(members) {
 async function createEditAccessRequest() {
   const uid = currentUid();
   if (!uid || !state.tripId || canEditItinerary()) return;
+  if (isOffline()) { toast("目前離線，請恢復網路後再申請編輯權限"); return; }
 
   // 使用申請者 UID 作為文件 ID，避免訪客送出申請前必須查詢整個申請集合。
   // 同一個 UID 在同一個行程中只會有一筆申請資料。
@@ -678,6 +978,7 @@ async function approveAccessRequest(requestId, requestedUid, memberId, { overrid
   if (!state.tripId || !requestedUid || !memberId) {
     throw new Error("缺少核准申請所需資料");
   }
+  if (isOffline()) throw new Error("目前離線，核准申請需要網路連線");
   const tripRef = doc(db, "trips", state.tripId);
   const requestRef = doc(db, "trips", state.tripId, "accessRequests", requestId);
   await runTransaction(db, async (tx) => {
@@ -780,7 +1081,7 @@ function subscribeDays() {
   clearUnsub("days");
   const q = query(collection(db, "trips", state.tripId, "days"), orderBy("order", "asc"));
   state.unsub.days = onSnapshot(q, (snap) => {
-    state.days = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    state.days = snap.docs.map((d) => ({ id: d.id, ...d.data(SNAP_OPTS) }));
     if ((!state.currentDayId || !state.days.find((d) => d.id === state.currentDayId)) && state.days.length) {
       state.currentDayId = state.days[0].id;
     }
@@ -849,7 +1150,7 @@ function subscribeSpots(dayId) {
   clearUnsub("spots");
   const q = query(collection(db, "trips", state.tripId, "days", dayId, "spots"), orderBy("order", "asc"));
   state.unsub.spots = onSnapshot(q, (snap) => {
-    state.spots = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    state.spots = snap.docs.map((d) => ({ id: d.id, ...d.data(SNAP_OPTS) }));
     if (state.tripSection === "itinerary" && !state.currentSpotId) {
       renderTripHome();
     }
@@ -935,12 +1236,12 @@ function subscribeSpot(dayId, spotId) {
       navigate(`#/trip/${state.tripId}/day/${dayId}`);
       return;
     }
-    state.currentSpot = { id: s.id, ...s.data() };
+    state.currentSpot = { id: s.id, ...s.data(SNAP_OPTS) };
     renderSpotPage();
   });
   const wq = query(collection(db, "trips", state.tripId, "days", dayId, "spots", spotId, "wishes"), orderBy("createdAt", "desc"));
   state.unsub.wishes = onSnapshot(wq, (snap) => {
-    state.wishes = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    state.wishes = snap.docs.map((d) => ({ id: d.id, ...d.data(SNAP_OPTS) }));
     renderSpotPage();
   });
 }
@@ -972,7 +1273,7 @@ function subscribeExpenses() {
   clearUnsub("expenses");
   const q = query(collection(db, "trips", state.tripId, "expenses"), orderBy("date", "asc"));
   state.unsub.expenses = onSnapshot(q, (snap) => {
-    state.expenses = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    state.expenses = snap.docs.map((d) => ({ id: d.id, ...d.data(SNAP_OPTS) }));
     if (state.tripSection === "expenses") renderExpensesPage();
   });
 }
@@ -1058,6 +1359,7 @@ document.getElementById("share-btn").addEventListener("click", () => {
 // 兩份用同一組 code 當文件 ID，撤銷／改期限時會同時更新。
 // ------------------------------------------------------------
 async function createTripInviteLink({ label, expiresAt, maxUses } = {}) {
+  if (isOffline()) return { code: null, error: "offline" };
   const tripId = state.tripId;
   const uid = currentUid();
   for (let i = 0; i < 6; i++) {
@@ -1076,13 +1378,14 @@ async function createTripInviteLink({ label, expiresAt, maxUses } = {}) {
       usedCount: 0,
     };
     try {
-      const batch = writeBatch(db);
+      const batch = rawWriteBatch(db);
       batch.set(doc(db, "shortlinks", code), payload);
       batch.set(doc(db, "trips", tripId, "inviteLinks", code), payload);
-      await batch.commit();
+      await withTimeout(batch.commit(), STRICT_TIMEOUT_MS);
       return { code, error: null };
     } catch (err) {
       console.error("[inviteLinks] 建立邀請連結失敗", err);
+      if (err && err.code === "timeout") return { code: null, error: "offline" };
       if (err && err.code === "permission-denied") {
         return { code: null, error: "permission-denied" };
       }
@@ -1105,26 +1408,29 @@ async function loadInviteLinks() {
 }
 
 async function deleteInviteLink(code) {
-  const batch = writeBatch(db);
+  if (isOffline()) throw offlineError();
+  const batch = rawWriteBatch(db);
   batch.delete(doc(db, "shortlinks", code));
   batch.delete(doc(db, "trips", state.tripId, "inviteLinks", code));
-  await batch.commit();
+  await withTimeout(batch.commit(), STRICT_TIMEOUT_MS);
 }
 
 async function setInviteLinkExpiry(code, expiresAtDateOrNull) {
+  if (isOffline()) throw offlineError();
   const value = expiresAtDateOrNull ? Timestamp.fromDate(expiresAtDateOrNull) : null;
-  const batch = writeBatch(db);
+  const batch = rawWriteBatch(db);
   batch.update(doc(db, "shortlinks", code), { expiresAt: value });
   batch.update(doc(db, "trips", state.tripId, "inviteLinks", code), { expiresAt: value });
-  await batch.commit();
+  await withTimeout(batch.commit(), STRICT_TIMEOUT_MS);
 }
 
 // 次數上限：留空／null 代表無限次，統籌人可隨時調整，跟到期時間走同一套「手動調整」邏輯。
 async function setInviteLinkMaxUses(code, maxUsesOrNull) {
-  const batch = writeBatch(db);
+  if (isOffline()) throw offlineError();
+  const batch = rawWriteBatch(db);
   batch.update(doc(db, "shortlinks", code), { maxUses: maxUsesOrNull });
   batch.update(doc(db, "trips", state.tripId, "inviteLinks", code), { maxUses: maxUsesOrNull });
-  await batch.commit();
+  await withTimeout(batch.commit(), STRICT_TIMEOUT_MS);
 }
 
 function inviteLinkStatus(link) {
@@ -1381,6 +1687,91 @@ document.getElementById("new-trip-btn").addEventListener("click", () => {
   closeMenu();
   renderNewTripModal();
 });
+// ------------------------------------------------------------
+// v21p6：「離線與同步」面板
+// ------------------------------------------------------------
+function fmtDownloadInfo(dl) {
+  if (!dl) return "尚未下載。出發前在有網路時按一次，離線時才能完整查看所有天數、景點、留言與記帳。";
+  const when = new Date(dl.at).toLocaleString("zh-Hant-TW", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  return `上次下載：${when}（${dl.days} 天、${dl.spots} 個景點、${dl.wishes} 則留言、${dl.expenses} 筆記帳）。之後別人的新內容，開網頁時會自動更新進來。`;
+}
+function renderOfflineModal() {
+  closeMenu();
+  const canDownload = !!state.tripId && !!state.trip && canViewContent();
+  openModal("📴 離線與同步", `
+    <div id="offline-panel-status" class="offline-status"></div>
+    <div class="offline-actions">
+      <button class="primary-btn full-width" id="offline-sync-now">☁️ 立即同步</button>
+      ${canDownload ? `
+        <button class="secondary-btn full-width" id="offline-download">⬇️ 下載此行程供離線使用</button>
+        <div class="offline-note" id="offline-dl-info">${escapeHtml(fmtDownloadInfo(getOfflineDownloads()[state.tripId]))}</div>` : `
+        <div class="offline-note">先開啟某個行程，這裡才會出現「下載此行程」。</div>`}
+      <button class="secondary-btn full-width" id="offline-toggle">${sync.manualOffline ? "🌐 結束離線模式（連線並同步）" : "📴 開啟離線模式（訊號很差時使用）"}</button>
+      ${sync.failedCount > 0 ? `<button class="secondary-btn full-width" id="offline-clear-failed">我知道了，清除警示</button>` : ""}
+    </div>
+    <details class="offline-help">
+      <summary>離線時可以做什麼？（點開查看）</summary>
+      <ul>
+        <li>可以照常查看行程、新增／修改景點與內容、許願池留言、記帳。變更會先存在這台裝置。</li>
+        <li>恢復網路後，<b>請保持網頁開啟</b>，等狀態顯示「已同步」，其他人才看得到。若中途關掉網頁，下次再打開網站時會繼續上傳。</li>
+        <li>離線時<b>無法</b>：建立邀請連結／同步代碼、管理成員與權限、核准編輯申請、自動查匯率（匯率可手動輸入）。</li>
+        <li>這台裝置必須<b>先在有網路時開過該行程</b>，離線才看得到；建議出發前按「下載此行程」。</li>
+        <li>離線時刪除整天、刪除景點、搬移／複製景點，需要先下載過該行程。</li>
+        <li>圖片是外部網址，離線時通常不會顯示（除非瀏覽器剛好暫存過）。地圖連結需要網路才能開。</li>
+        <li>⚠️ 兩個人都離線、又改到<b>同一個景點（或同一天）的內容區塊</b>時，後上傳的會覆蓋先上傳的。分開改不同景點、不同記帳明細不會互相影響。</li>
+        <li>離線期間如果你的權限被統籌人調整，或行程被停用，恢復連線後那些變更可能被伺服器拒絕，畫面會還原並跳出警示。</li>
+      </ul>
+    </details>
+    <div class="form-actions">
+      <button class="secondary-btn" id="offline-close">關閉</button>
+    </div>
+    <div class="offline-danger">
+      <button class="danger-btn small-btn" id="offline-clear-local">🧹 清除這台裝置的離線資料</button>
+      <div class="offline-note">在公用電腦或借來的裝置上用完請按這個。尚未同步的變更會一併消失。</div>
+    </div>
+  `);
+  updateSyncBadge();
+  document.getElementById("offline-close").onclick = closeModal;
+  document.getElementById("offline-sync-now").onclick = () => { syncNow(); };
+  document.getElementById("offline-toggle").onclick = async () => {
+    await setManualOffline(!sync.manualOffline);
+    renderOfflineModal();
+  };
+  const clearFailed = document.getElementById("offline-clear-failed");
+  if (clearFailed) clearFailed.onclick = () => { sync.failedCount = 0; updateSyncBadge(); renderOfflineModal(); };
+  const dlBtn = document.getElementById("offline-download");
+  if (dlBtn) {
+    dlBtn.onclick = async () => {
+      if (isOffline()) { toast("目前離線，需要網路才能下載"); return; }
+      const info = document.getElementById("offline-dl-info");
+      dlBtn.disabled = true;
+      try {
+        const stats = await withTimeout(downloadTripForOffline((st) => {
+          const el = document.getElementById("offline-dl-info");
+          if (el) el.textContent = `下載中…${st.days} 天、${st.spots} 個景點、${st.wishes} 則留言`;
+        }), 60000);
+        toast("✅ 已下載，這個行程可以離線查看了");
+        const el = document.getElementById("offline-dl-info");
+        if (el) el.textContent = fmtDownloadInfo({ at: Date.now(), ...stats });
+      } catch (err) {
+        console.error("[offline] 下載失敗", err);
+        if (info) info.textContent = "下載失敗或逾時，請確認網路後再試一次。";
+      }
+      dlBtn.disabled = false;
+    };
+  }
+  document.getElementById("offline-clear-local").onclick = () => {
+    openConfirm(
+      sync.hasPending
+        ? "這台裝置還有「尚未同步」的變更，清除後會永久消失。確定要清除離線資料嗎？"
+        : "會清除這台裝置上的離線行程資料（雲端資料不受影響），並重新載入網頁。確定嗎？",
+      clearLocalOfflineData,
+    );
+  };
+}
+document.getElementById("offline-panel-btn").addEventListener("click", renderOfflineModal);
+document.getElementById("sync-status-btn").addEventListener("click", renderOfflineModal);
+
 document.getElementById("show-uid-btn").addEventListener("click", () => {
   closeMenu();
   const uid = currentUid();
@@ -1469,13 +1860,15 @@ function genShortCode(len = 12) {
   return s;
 }
 async function createShortlink(data, attempts = 6) {
+  if (isOffline()) return { code: null, error: "offline" };
   for (let i = 0; i < attempts; i++) {
     const code = genShortCode();
     try {
-      await setDoc(doc(db, "shortlinks", code), { ...data, createdBy: currentUid(), createdAt: serverTimestamp() });
+      await withTimeout(rawSetDoc(doc(db, "shortlinks", code), { ...data, createdBy: currentUid(), createdAt: serverTimestamp() }), STRICT_TIMEOUT_MS);
       return { code, error: null };
     } catch (err) {
       console.error("[shortlinks] 建立代碼失敗", err);
+      if (err && err.code === "timeout") return { code: null, error: "offline" };
       // 權限被拒（Firestore 規則沒開放）不管重試幾次結果都一樣，直接回報，不要浪費時間重試
       if (err && err.code === "permission-denied") {
         return { code: null, error: "permission-denied" };
@@ -1496,6 +1889,9 @@ async function getShortlinkData(code) {
   }
 }
 function shortlinkErrorMessage(error) {
+  if (error === "offline") {
+    return "目前離線或網路不穩，無法產生連結。請恢復網路後再試（連結必須先存到雲端，別人才打得開）。";
+  }
   if (error === "permission-denied") {
     return "連結產生失敗：Firestore 安全規則可能還沒加上 shortlinks 那段設定。請到 Firebase 主控台 → Firestore Database → 規則分頁，確認內容包含 shortlinks 集合的規則（見 README「Part 3：設定 Firestore 安全規則」），改好後記得按「發布」，再回來試一次。";
   }
@@ -1544,6 +1940,11 @@ async function importSyncCode(rawCode) {
     }
   } catch {
     // 不是舊格式，當作新版的 Firestore 短代碼繼續查詢
+  }
+  if (isOffline()) {
+    toast("目前離線，無法匯入同步代碼，請恢復網路後再試");
+    navigate("");
+    return;
   }
   renderLoading();
   const normalizedCode = String(rawCode).trim().toUpperCase();
@@ -1743,7 +2144,7 @@ function attachRequestAccessHandler(btn) {
       await createEditAccessRequest();
     } catch (err) {
       console.error(err);
-      toast("申請送出失敗，請確認 Firebase 規則已更新");
+      toast(failMsg("申請送出失敗，請確認 Firebase 規則已更新"));
     }
     btn.disabled = false;
   };
@@ -1843,6 +2244,7 @@ function renderTripHome() {
     document.getElementById("edit-day-meta-btn").addEventListener("click", () => renderEditDayMetaModal(day));
     document.getElementById("delete-day-btn").addEventListener("click", () => {
       openConfirm(`確定要刪除「${day.title}」整天的行程嗎？裡面的景點也會一併刪除。`, async () => {
+        if (!ensureCacheComplete("刪除整天行程")) return;
         await deleteDay(day.id);
         state.currentDayId = null;
         navigate(`#/trip/${state.tripId}`);
@@ -2309,6 +2711,7 @@ function renderSpotPage() {
     document.getElementById("move-spot-meta-btn").addEventListener("click", () => renderSpotDayPickerModal(day.id, spot, "move"));
     document.getElementById("delete-spot-btn").addEventListener("click", () => {
       openConfirm(`確定要刪除「${spot.title}」嗎？`, async () => {
+        if (!ensureCacheComplete("刪除景點")) return;
         await deleteSpot(day.id, spot.id);
         closeSpotPanel();
         toast("已刪除");
@@ -2449,6 +2852,7 @@ function renderSpotDayPickerModal(sourceDayId, spot, mode) {
       const targetDayId = el.dataset.pickDayid;
       const targetDay = state.days.find((d) => d.id === targetDayId);
       closeModal();
+      if (!ensureCacheComplete(isMove ? "搬移景點" : "複製景點")) return;
       if (isMove) {
         await moveSpotToDay(sourceDayId, spot, targetDayId);
         closeSpotPanel();
@@ -3399,14 +3803,14 @@ function renderManageMembersModal() {
                   return;
                 } catch (err2) {
                   console.error(err2);
-                  toast("核准失敗，請確認規則及成員資料");
+                  toast(failMsg("核准失敗，請確認規則及成員資料"));
                 }
               }
               btn.disabled = false;
               return;
             }
             console.error(err);
-            toast("核准失敗，請確認規則及成員資料");
+            toast(failMsg("核准失敗，請確認規則及成員資料"));
             btn.disabled = false;
           }
         };
@@ -3454,5 +3858,8 @@ function renderManageMembersModal() {
 // 啟動
 // ------------------------------------------------------------
 authReady.then(() => {
+  if (sync.manualOffline) disableNetwork(db).catch(() => {}); // 上次開著離線模式，這次也維持
+  updateSyncBadge();
+  checkPending(); // 發現上次遺留、還沒上傳的變更
   route();
 });
