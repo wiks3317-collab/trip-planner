@@ -97,6 +97,12 @@ service cloud.firestore {
         && (!('usedCount' in data) || (data.usedCount is int && data.usedCount >= 0));
     }
 
+    // v21p7：申請人可附上自己的名字／暱稱（選填，1～30 字），讓統籌人審核時知道是誰。
+    function validRequestedName(data) {
+      return !('requestedName' in data)
+        || (data.requestedName is string && data.requestedName.size() >= 1 && data.requestedName.size() <= 30);
+    }
+
     function validSyncShortlink(data) {
       return data.type == 'sync'
         && data.createdBy == request.auth.uid
@@ -349,7 +355,8 @@ service cloud.firestore {
       match /accessRequests/{requestId} {
         allow create: if signedIn()
           && requestId == request.auth.uid
-          && request.resource.data.keys().hasOnly(['requestedUid', 'status', 'createdAt', 'inviteCode'])
+          && request.resource.data.keys().hasOnly(['requestedUid', 'status', 'createdAt', 'inviteCode', 'requestedName'])
+          && validRequestedName(request.resource.data)
           && request.resource.data.requestedUid == request.auth.uid
           && request.resource.data.status == 'pending'
           && request.resource.data.inviteCode is string
@@ -374,7 +381,8 @@ service cloud.firestore {
             && (resource.data.status == 'rejected' || resource.data.status == 'approved')
             && request.resource.data.requestedUid == resource.data.requestedUid
             && request.resource.data.status == 'pending'
-            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'createdAt', 'inviteCode'])
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'createdAt', 'inviteCode', 'requestedName'])
+            && validRequestedName(request.resource.data)
             && canRequestAccess(tripId));
         // v21p5：原本一律禁止刪除，導致有人拿邀請代碼灌爆申請後永遠清不掉。
         // 現在統籌人可清理自己行程的申請（含待審／已結案）；具編輯權限的系統管理員需 15 分鐘內重新登入。
