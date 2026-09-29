@@ -24,12 +24,18 @@ import {
   onAuthStateChanged,
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
 
-import { firebaseConfig } from "./firebase-options.js"; // 設定值集中在 firebase-options.js
+import { initializeAppCheck, ReCaptchaV3Provider } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app-check.js";
+import { firebaseConfig, appCheckSiteKey } from "./firebase-options.js"; // 設定值集中在 firebase-options.js
 
 // 用不同的 app 名稱（"admin"）初始化，避免萬一同一個瀏覽器分頁裡
 // 同時載入到一般頁面邏輯時互相干擾（正常情況下 admin.html 與
 // index.html 是完全不同的頁面，不會同時存在，這只是多一層保險）。
 const adminApp = initializeApp(firebaseConfig, "admin");
+// v21p5：App Check（金鑰留空則略過），必須在 getFirestore／getAuth 之前初始化。
+if (appCheckSiteKey) {
+  if (["localhost", "127.0.0.1"].includes(location.hostname)) self.FIREBASE_APPCHECK_DEBUG_TOKEN = true;
+  initializeAppCheck(adminApp, { provider: new ReCaptchaV3Provider(appCheckSiteKey), isTokenAutoRefreshEnabled: true });
+}
 const db = getFirestore(adminApp);
 const auth = getAuth(adminApp);
 const googleProvider = new GoogleAuthProvider();
