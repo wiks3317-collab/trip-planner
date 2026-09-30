@@ -5,7 +5,7 @@
 // 行程資料的離線存取由 Firestore 自己的本機快取處理（見 firebase-config.js），這裡完全不碰。
 //
 // 快取策略：
-//   - 帶 ?v= 版本號的檔案（boot.js?v=21p7 等）：快取優先（版本號一變就是新網址，不會拿到舊檔）
+//   - 帶 ?v= 版本號的檔案（boot.js?v=21p9 等）：快取優先（版本號一變就是新網址，不會拿到舊檔）
 //   - 其他同網域檔案（index.html、style.css、firebase-*.js…）：網路優先，
 //     超過 3 秒沒回應（訊號很差）或斷網就用快取
 //   - gstatic 上固定版本的 Firebase 模組：快取優先
@@ -15,7 +15,7 @@
 // ⚠️ 每次發新版時，請同步修改下面的 VERSION（與 index.html／boot.js 的 ?v= 一致），
 //    瀏覽器才會發現 sw.js 有更新、換上新的快取。
 // ============================================================
-const VERSION = "21p7";
+const VERSION = "21p9";
 const APP_CACHE = "trip-app-" + VERSION;
 const LIB_CACHE = "trip-lib-1";
 const NETWORK_TIMEOUT_MS = 3000;
