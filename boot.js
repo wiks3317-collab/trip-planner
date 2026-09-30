@@ -42,7 +42,7 @@ if (window.top !== window.self) {
         showError("⚠️ Promise 初始化錯誤", event ? event.reason : null);
       });
 
-      import("./app.js?v=21p7").catch(function (err) {
+      import("./app.js?v=21p9").catch(function (err) {
         showError("⚠️ 網站程式載入失敗", err);
       });
 
