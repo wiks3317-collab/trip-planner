@@ -172,6 +172,40 @@ h1, h2, h3 { font-family: var(--font-heading); }
   border-top: 1px dashed var(--border);
 }
 #new-trip-btn { margin: 0 12px 12px; width: calc(100% - 24px); }
+/* v21p9：行程設定清單 */
+.settings-list { display: grid; gap: 8px; margin-bottom: 14px; }
+.settings-item {
+  display: flex; align-items: center; gap: 12px; width: 100%;
+  padding: 12px 14px; text-align: left;
+  background: var(--card-bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.settings-item:hover { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 6%, white); }
+.settings-item-icon { font-size: 22px; line-height: 1; }
+.settings-item-text { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.settings-item-text b { font-size: 14.5px; }
+.settings-item-text small { font-size: 12px; color: var(--text-muted); }
+.settings-item-arrow { color: var(--text-muted); font-size: 20px; }
+/* v21p8：並排兩顆各占一半寬度的按鈕（裝置 UID／管理員後台） */
+.menu-row { display: flex; gap: 8px; margin-top: 8px; }
+.menu-row > .secondary-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 6px;
+  font-size: 13px;
+  white-space: nowrap;
+  text-align: center;
+  text-decoration: none;
+}
+/* v21p8：手機上工具列變多，讓按鈕列自成一行靠右，避免擠壓行程名稱 */
+@media (max-width: 560px) {
+  #app-header { flex-wrap: wrap; row-gap: 4px; }
+  #header-actions { order: 3; flex: 1 0 100%; justify-content: flex-end; flex-wrap: wrap; }
+}
 
 /* ================= Buttons ================= */
 .primary-btn {
@@ -711,18 +745,9 @@ h1, h2, h3 { font-family: var(--font-heading); }
 }
 
 /* ---- v21p6：離線與同步 ---- */
-.sync-pill {
-  border: 1px solid var(--border);
-  background: var(--card-bg);
-  color: var(--text);
-  border-radius: 999px;
-  padding: 4px 10px;
-  font-size: 12px;
-  font-weight: 700;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.sync-pill.sync-warn { background: var(--danger-bg); color: var(--danger); border-color: var(--danger); }
+/* v21p8：同步狀態改成右上角工具列的小圓點按鈕（🟢 正常／🟡 同步中／🔴 離線／🟠 有變更未同步） */
+#sync-status-btn { font-size: 15px; }
+#sync-status-btn.sync-warn { background: var(--danger-bg); }
 .offline-status { display: grid; gap: 6px; padding: 10px 12px; margin-bottom: 12px; background: var(--bg); border-radius: var(--radius-sm); font-size: 14px; line-height: 1.5; }
 .offline-actions { display: grid; gap: 8px; }
 .offline-note { font-size: 12.5px; color: var(--text-muted); line-height: 1.5; }
