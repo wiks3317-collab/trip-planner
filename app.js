@@ -3874,8 +3874,38 @@ function renderManageMembersModal() {
   `);
   renderRows();
   renderInviteLinksSection();
-  (async () => {
+
+  // v21p10：核准／拒絕／清除申請後，只重新整理「編輯權限申請」這一區，不再關閉整個視窗。
+  // 核准會在伺服器上新增成員或綁定 UID，所以上方的成員清單（本機暫存的 members）要一併對齊最新資料，
+  // 否則之後按「儲存」會用舊清單覆蓋掉剛核准的人。使用者尚未儲存的編輯（改名、改權限、刪除）不會被動到。
+  const knownServerIds = new Set(members.map((m) => m.id));
+  async function syncMembersFromServer() {
+    try {
+      const snap = await getDoc(doc(db, "trips", state.tripId));
+      if (!snap.exists()) return;
+      const serverMembers = (snap.data().members || []).map((m) => ({ ...m, uids: memberUids(m) }));
+      serverMembers.forEach((sm) => {
+        const local = members.find((m) => m.id === sm.id);
+        if (local) {
+          const missing = sm.uids.filter((u) => !local.uids.includes(u));
+          if (missing.length) {
+            local.uids = [...local.uids, ...missing];
+            local.permission = sm.permission;
+            syncMemberUid(local);
+          }
+        } else if (!knownServerIds.has(sm.id)) {
+          members.push({ ...sm });
+        }
+        knownServerIds.add(sm.id);
+      });
+      renderRows();
+    } catch (err) {
+      console.error("[members] 核准後同步成員清單失敗", err);
+    }
+  }
+  async function loadRequestsSection() {
     const wrap = document.getElementById("access-requests-wrap");
+    if (!wrap) return; // 視窗已被關閉
     try {
       const allRequests = await loadAccessRequests();
       const tsOf = (r) => (r.createdAt && r.createdAt.seconds) || 0;
@@ -3895,7 +3925,7 @@ function renderManageMembersModal() {
           try {
             await deleteAccessRequests(ids);
             toast(`已清除 ${ids.length} 筆${label}`);
-            closeModal();
+            await loadRequestsSection();
           } catch (err) {
             console.error(err);
             toast("清除失敗，請確認 Firestore Rules 已更新到 v21p5");
@@ -3952,7 +3982,8 @@ function renderManageMembersModal() {
             btn.disabled = true;
             await approveAccessRequest(req.id, req.requestedUid, select.value);
             toast("已核准。對方的畫面會自動更新，若沒有請請對方重新整理");
-            closeModal();
+            await syncMembersFromServer();
+            await loadRequestsSection();
           } catch (err) {
             // 次數上限的判斷在 Transaction 內用最新資料重新核對，這裡才是唯一可信的「已達上限」時機；
             // 跳出確認後若統籌人仍要核准，會帶 overrideCap 重新呼叫一次。
@@ -3962,7 +3993,8 @@ function renderManageMembersModal() {
                 try {
                   await approveAccessRequest(req.id, req.requestedUid, select.value, { overrideCap: true });
                   toast("已核准。對方的畫面會自動更新，若沒有請請對方重新整理");
-                  closeModal();
+                  await syncMembersFromServer();
+                  await loadRequestsSection();
                   return;
                 } catch (err2) {
                   console.error(err2);
@@ -3983,7 +4015,7 @@ function renderManageMembersModal() {
           try {
             await rejectAccessRequest(btn.dataset.rejectRequest);
             toast("已拒絕申請");
-            closeModal();
+            await loadRequestsSection();
           } catch (err) {
             console.error(err);
             toast("拒絕申請失敗");
@@ -3994,7 +4026,8 @@ function renderManageMembersModal() {
       console.error(err);
       wrap.innerHTML = `<p style="color:var(--danger);font-size:13px;">申請資料載入失敗，請確認 Firestore Rules。</p>`;
     }
-  })();
+  }
+  loadRequestsSection();
   document.getElementById("manage-add-member-btn").addEventListener("click", () => {
     members.push({ id: newLocalId(), name: "", permission: "editor", uid: null, uids: [] });
     renderRows();
