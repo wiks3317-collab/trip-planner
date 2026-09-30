@@ -164,14 +164,16 @@ function syncStatus() {
 function updateSyncBadge() {
   const btn = document.getElementById("sync-status-btn");
   if (btn) {
+    // v21p8：按鈕常駐在右上角，用圓點當 icon 顯示連線狀態；詳細內容點開「離線與同步」面板看
     const st = syncStatus();
-    let text = "";
-    if (st === "manual") text = "📴 離線模式";
-    else if (st === "offline") text = sync.hasPending ? "📴 離線・待同步" : "📴 離線";
-    else if (st === "pending") text = "🔄 同步中";
-    else if (sync.failedCount > 0) text = "⚠️ 有變更未同步";
-    btn.textContent = text;
-    btn.classList.toggle("hidden", !text);
+    let icon = "🟢", tip = "連線正常";
+    if (st === "manual") { icon = "🔴"; tip = "離線模式"; }
+    else if (st === "offline") { icon = "🔴"; tip = sync.hasPending ? "離線・待同步" : "離線"; }
+    else if (st === "pending") { icon = "🟡"; tip = "同步中"; }
+    else if (sync.failedCount > 0) { icon = "🟠"; tip = "有變更未同步"; }
+    btn.textContent = icon;
+    btn.title = "離線與同步：" + tip;
+    btn.setAttribute("aria-label", "離線與同步：" + tip);
     btn.classList.toggle("sync-warn", st === "ok" && sync.failedCount > 0);
   }
   const panel = document.getElementById("offline-panel-status");
@@ -1372,6 +1374,10 @@ function updateHeader() {
   const badge = document.getElementById("current-member-badge");
   const shareBtn = document.getElementById("share-btn");
   const renameBtn = document.getElementById("rename-trip-btn");
+  // v21p9：「⚙️ 行程設定」只給統籌人（owner）看；裡面收著背景／貨幣／成員管理／邀請連結
+  const settingsBtn = document.getElementById("trip-settings-btn");
+  const showOwnerTools = !!(state.trip && state.trip.deleted !== true && isOwner());
+  settingsBtn.classList.toggle("hidden", !showOwnerTools);
   if (state.trip) {
     nameEl.textContent = state.trip.name;
     const m = myMember();
@@ -1379,12 +1385,10 @@ function updateHeader() {
       ? `你是：${m.name}${m.permission === "viewer" ? "（唯讀）" : ""}`
       : "尚未綁定身份";
     badge.classList.remove("hidden");
-    shareBtn.classList.remove("hidden");
     renameBtn.classList.toggle("hidden", !isOwner());
   } else {
     nameEl.textContent = "旅行行程規劃工具";
     badge.classList.add("hidden");
-    shareBtn.classList.add("hidden");
     renameBtn.classList.add("hidden");
   }
 }
@@ -1410,9 +1414,36 @@ document.getElementById("rename-trip-btn").addEventListener("click", () => {
   };
 });
 
-document.getElementById("share-btn").addEventListener("click", () => {
-  renderShareTripModal();
-});
+// v21p9：行程設定（僅統籌人）。把四個管理功能收在同一個入口。
+function renderTripSettingsModal() {
+  if (!isOwner()) return;
+  const items = [
+    ["members", "👥", "管理成員與權限", "成員、權限、編輯權限申請", renderManageMembersModal],
+    ["share", "🔗", "邀請連結", "建立與管理邀請連結", renderShareTripModal],
+    ["background", "🖼️", "背景圖片設定", "行程背景與遮罩", renderBackgroundSettingsModal],
+    ["currency", "💱", "貨幣設定", "記帳使用的貨幣與匯率", renderCurrencySettingsModal],
+  ];
+  openModal("⚙️ 行程設定", `
+    <div class="settings-list">
+      ${items.map(([key, icon, label, desc]) => `
+        <button type="button" class="settings-item" data-key="${key}">
+          <span class="settings-item-icon">${icon}</span>
+          <span class="settings-item-text"><b>${label}</b><small>${desc}</small></span>
+          <span class="settings-item-arrow">›</span>
+        </button>`).join("")}
+    </div>
+    <div class="form-actions"><button class="secondary-btn" id="trip-settings-close">關閉</button></div>
+  `);
+  document.getElementById("trip-settings-close").onclick = closeModal;
+  document.querySelectorAll(".settings-item").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const it = items.find((x) => x[0] === btn.dataset.key);
+      closeModal();
+      if (it && isOwner()) it[4]();
+    });
+  });
+}
+document.getElementById("trip-settings-btn").addEventListener("click", renderTripSettingsModal);
 
 // ------------------------------------------------------------
 // 邀請連結（可設定到期時間、次數上限，撤銷後可永久刪除，多組並存）
@@ -1698,26 +1729,6 @@ function closeMenu() {
 }
 
 function renderTripMenu() {
-  ["manage-members-menu-btn", "currency-settings-menu-btn", "background-settings-menu-btn"].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) el.remove();
-  });
-  if (state.trip && isOwner()) {
-    const mkBtn = (id, label, onClick) => {
-      const btn = document.createElement("button");
-      btn.id = id;
-      btn.className = "secondary-btn full-width";
-      btn.style.margin = "0 12px 10px";
-      btn.style.width = "calc(100% - 24px)";
-      btn.textContent = label;
-      btn.addEventListener("click", () => { closeMenu(); onClick(); });
-      document.getElementById("new-trip-btn").insertAdjacentElement("beforebegin", btn);
-    };
-    mkBtn("background-settings-menu-btn", "🖼️ 背景圖片設定", renderBackgroundSettingsModal);
-    mkBtn("currency-settings-menu-btn", "💱 貨幣設定", renderCurrencySettingsModal);
-    mkBtn("manage-members-menu-btn", "👥 管理成員與權限", renderManageMembersModal);
-  }
-
   const list = document.getElementById("trip-list");
   const trips = getMyTrips();
   if (!trips.length) {
@@ -1831,7 +1842,6 @@ function renderOfflineModal() {
     );
   };
 }
-document.getElementById("offline-panel-btn").addEventListener("click", renderOfflineModal);
 document.getElementById("sync-status-btn").addEventListener("click", renderOfflineModal);
 
 document.getElementById("show-uid-btn").addEventListener("click", () => {
