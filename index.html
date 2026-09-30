@@ -31,10 +31,11 @@
       <button id="rename-trip-btn" class="icon-btn hidden" title="重新命名行程" style="font-size:13px;">✏️</button>
     </div>
     <div id="header-actions">
-      <button id="sync-status-btn" class="sync-pill hidden" title="離線與同步狀態"></button>
       <button id="current-member-badge" class="hidden" title="目前身份"></button>
-      <button id="appearance-btn" class="icon-btn" title="外觀設定">🎨</button>
-      <button id="share-btn" class="icon-btn hidden" title="分享此行程">🔗</button>
+      <button id="sync-status-btn" class="icon-btn" title="離線與同步：連線正常" aria-label="離線與同步">🟢</button>
+      <!-- v21p9：背景／貨幣／成員管理／邀請連結收進「行程設定」，只有統籌人（owner）看得到，由 updateHeader() 控制 -->
+      <button id="trip-settings-btn" class="icon-btn hidden" title="行程設定" aria-label="行程設定">⚙️</button>
+      <button id="appearance-btn" class="icon-btn" title="外觀設定" aria-label="外觀設定">🎨</button>
     </div>
   </header>
 
@@ -50,9 +51,10 @@
     <div class="menu-footer">
       <button id="join-trip-btn" class="secondary-btn full-width">用邀請連結或代碼加入行程</button>
       <button id="sync-devices-btn" class="secondary-btn full-width" style="margin-top:8px;">🔄 跨裝置同步清單</button>
-      <button id="offline-panel-btn" class="secondary-btn full-width" style="margin-top:8px;">📴 離線與同步</button>
-      <button id="show-uid-btn" class="secondary-btn full-width" style="margin-top:8px;">🪪 顯示目前裝置 UID</button>
-      <a id="admin-link-btn" href="admin.html" target="_blank" rel="noopener" class="secondary-btn full-width" style="display:block;box-sizing:border-box;margin-top:8px;text-align:center;text-decoration:none;">🛠️ 管理員後台</a>
+      <div class="menu-row">
+        <button id="show-uid-btn" class="secondary-btn" title="顯示目前裝置 UID">🪪 裝置 UID</button>
+        <a id="admin-link-btn" href="admin.html" target="_blank" rel="noopener" class="secondary-btn" title="管理員後台">🛠️ 管理員後台</a>
+      </div>
     </div>
   </aside>
 
@@ -82,6 +84,6 @@
   <!-- Toast 提示 -->
   <div id="toast-container"></div>
 
-  <script src="boot.js?v=21p7"></script>
+  <script src="boot.js?v=21p9"></script>
 </body>
 </html>
