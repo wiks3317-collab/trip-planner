@@ -755,3 +755,8 @@ h1, h2, h3 { font-family: var(--font-heading); }
 .offline-help summary { cursor: pointer; font-weight: 700; }
 .offline-help ul { padding-left: 18px; margin: 8px 0 0; display: grid; gap: 6px; line-height: 1.55; }
 .offline-danger { margin-top: 16px; padding-top: 12px; border-top: 1px dashed var(--border); display: grid; gap: 6px; justify-items: start; }
+
+/* v21p11：24 小時制時間欄位（時：分 兩個下拉） */
+.time-field { display: flex; align-items: center; gap: 8px; }
+.time-field select { flex: 1; min-width: 0; }
+.time-field .time-colon { font-weight: 700; color: var(--text-muted); }
