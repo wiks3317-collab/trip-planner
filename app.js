@@ -497,20 +497,36 @@ function memberUids(member) {
 // 外觀設定（顏色 / 字型 / 字級）— 存在裝置本機，套用到整個網頁
 // ------------------------------------------------------------
 const LS_APPEARANCE = "tp_appearance";
+const LS_CUSTOM_PALETTE = "tp_custom_palette";
 
+// v21p12：色彩主題改用 index_v5 的 7 組配色（實際色票寫在 style.css，這裡只放 id、名稱與預覽圓點用的兩個色）
 const THEME_PRESETS = [
-  { id: "ocean", name: "海洋藍", primary: "#0E6B64", primaryDark: "#0A5450", accent: "#D98E2B", bg: "#EEF3F0" },
-  { id: "dusk", name: "薄暮紫", primary: "#5B4B8A", primaryDark: "#453873", accent: "#E8A33D", bg: "#F2EFF7" },
-  { id: "forest", name: "山林綠", primary: "#2F6B3A", primaryDark: "#23512C", accent: "#C97B2E", bg: "#EFF4EC" },
-  { id: "wheat", name: "麥浪黃", primary: "#B9840F", primaryDark: "#8F6608", accent: "#0E6B64", bg: "#F6F1E6" },
-  { id: "slate", name: "石板灰", primary: "#3B5166", primaryDark: "#2C3D4D", accent: "#C9A227", bg: "#EEF0F2" },
+  { id: "auto", name: "跟隨系統", c1: "#ffffff", c2: "#171a21" },
+  { id: "light", name: "淺色", c1: "#f6f7f9", c2: "#2563eb" },
+  { id: "dark", name: "深色", c1: "#0f1115", c2: "#4c8dff" },
+  { id: "sepia", name: "護眼米黃", c1: "#f1e8d4", c2: "#a8652a" },
+  { id: "forest", name: "森林綠", c1: "#eaf2ec", c2: "#2f855a" },
+  { id: "ocean", name: "深海藍", c1: "#0b1e2d", c2: "#2bb3d9" },
+  { id: "dracula", name: "紫夜", c1: "#282a36", c2: "#bd93f9" },
+  { id: "custom", name: "自訂", c1: "", c2: "" },
 ];
 
-const FONT_PRESETS = [
-  { id: "journal", name: "手札質感", heading: '"LXGW WenKai TC", "Noto Serif TC", serif', body: '"Noto Sans TC", sans-serif' },
-  { id: "modern", name: "現代俐落", heading: '"Noto Sans TC", sans-serif', body: '"Noto Sans TC", sans-serif' },
-  { id: "refined", name: "細緻雅致", heading: '"Noto Serif TC", serif', body: '"Noto Sans TC", sans-serif' },
+// 自訂色盤可調整的欄位（key 對應 CSS 變數）
+const PALETTE_FIELDS = [
+  { key: "bg", cssVar: "--bg", label: "頁面背景" },
+  { key: "card", cssVar: "--card-bg", label: "卡片背景" },
+  { key: "surface", cssVar: "--surface-muted", label: "淡色底" },
+  { key: "text", cssVar: "--text", label: "文字" },
+  { key: "muted", cssVar: "--text-muted", label: "次要文字" },
+  { key: "border", cssVar: "--border", label: "邊框" },
+  { key: "primary", cssVar: "--primary", label: "主色（按鈕）" },
+  { key: "onPrimary", cssVar: "--on-primary", label: "主色上的文字" },
+  { key: "accent", cssVar: "--accent", label: "強調色" },
 ];
+const DEFAULT_CUSTOM_PALETTE = {
+  bg: "#f6f7f9", card: "#ffffff", surface: "#eef0f3", text: "#1f2328", muted: "#6b7280",
+  border: "#d0d7de", primary: "#2563eb", onPrimary: "#ffffff", accent: "#D98E2B",
+};
 
 const SIZE_PRESETS = [
   { id: "sm", name: "小", px: "15px" },
@@ -521,30 +537,57 @@ const SIZE_PRESETS = [
 function loadAppearance() {
   try {
     const saved = JSON.parse(localStorage.getItem(LS_APPEARANCE) || "{}");
-    return {
-      themeId: saved.themeId || "ocean",
-      fontId: saved.fontId || "journal",
-      sizeId: saved.sizeId || "md",
-    };
+    // 舊版（v21p11 以前）的主題 id 是另一套（海洋藍、薄暮紫…），沒有 v:2 標記就一律回到「跟隨系統」
+    const themeOk = saved.v === 2 && THEME_PRESETS.some((t) => t.id === saved.themeId);
+    return { v: 2, themeId: themeOk ? saved.themeId : "auto", sizeId: saved.sizeId || "md" };
   } catch {
-    return { themeId: "ocean", fontId: "journal", sizeId: "md" };
+    return { v: 2, themeId: "auto", sizeId: "md" };
   }
 }
 function saveAppearance(settings) {
-  localStorage.setItem(LS_APPEARANCE, JSON.stringify(settings));
+  localStorage.setItem(LS_APPEARANCE, JSON.stringify({ v: 2, themeId: settings.themeId, sizeId: settings.sizeId }));
+}
+function loadCustomPalette() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LS_CUSTOM_PALETTE) || "null");
+    if (saved && typeof saved === "object") {
+      const out = { ...DEFAULT_CUSTOM_PALETTE };
+      PALETTE_FIELDS.forEach((f) => { if (/^#[0-9a-fA-F]{6}$/.test(saved[f.key] || "")) out[f.key] = saved[f.key]; });
+      return out;
+    }
+  } catch { /* 讀不到就用預設 */ }
+  return { ...DEFAULT_CUSTOM_PALETTE };
+}
+function saveCustomPalette(p) {
+  try { localStorage.setItem(LS_CUSTOM_PALETTE, JSON.stringify(p)); } catch { /* 儲存失敗不影響畫面 */ }
+}
+// 依背景亮度決定原生元件（捲軸、日期選擇器…）要用淺色還是深色樣式
+function isDarkColor(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  const lum = (0.2126 * (n >> 16 & 255) + 0.7152 * (n >> 8 & 255) + 0.0722 * (n & 255)) / 255;
+  return lum < 0.5;
 }
 function applyAppearance(settings) {
-  const theme = THEME_PRESETS.find((t) => t.id === settings.themeId) || THEME_PRESETS[0];
-  const font = FONT_PRESETS.find((f) => f.id === settings.fontId) || FONT_PRESETS[0];
   const size = SIZE_PRESETS.find((s) => s.id === settings.sizeId) || SIZE_PRESETS[1];
-  const root = document.documentElement.style;
-  root.setProperty("--primary", theme.primary);
-  root.setProperty("--primary-dark", theme.primaryDark);
-  root.setProperty("--accent", theme.accent);
-  root.setProperty("--bg", theme.bg);
-  root.setProperty("--font-heading", font.heading);
-  root.setProperty("--font-body", font.body);
+  const html = document.documentElement;
+  const root = html.style;
+  // 先清掉上一次「自訂」寫進去的變數，再依主題重新套用
+  PALETTE_FIELDS.forEach((f) => root.removeProperty(f.cssVar));
+  root.removeProperty("color-scheme");
+  if (settings.themeId === "auto") {
+    delete html.dataset.theme;
+  } else {
+    html.dataset.theme = settings.themeId;
+  }
+  if (settings.themeId === "custom") {
+    const p = loadCustomPalette();
+    PALETTE_FIELDS.forEach((f) => root.setProperty(f.cssVar, p[f.key]));
+    root.setProperty("color-scheme", isDarkColor(p.bg) ? "dark" : "light");
+  }
   root.setProperty("--base-font-size", size.px);
+  // 手機瀏覽器網址列顏色跟著背景走
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute("content", getComputedStyle(html).getPropertyValue("--card-bg").trim() || "#ffffff");
 }
 
 // 一載入就先套用外觀設定，讓載入畫面也是對的樣式
@@ -1638,6 +1681,23 @@ async function renderShareTripModal() {
 
 document.getElementById("appearance-btn").addEventListener("click", renderAppearanceModal);
 
+// 把目前畫面上實際生效的顏色讀出來（轉成 #rrggbb），讓「自訂」第一次開啟時是從目前主題微調，而不是從零開始
+function snapshotCurrentPalette() {
+  const probe = document.createElement("span");
+  probe.style.display = "none";
+  document.body.appendChild(probe);
+  const cs = getComputedStyle(document.documentElement);
+  const out = {};
+  PALETTE_FIELDS.forEach((f) => {
+    probe.style.color = "";
+    probe.style.color = cs.getPropertyValue(f.cssVar).trim();
+    const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(getComputedStyle(probe).color);
+    out[f.key] = m ? "#" + [m[1], m[2], m[3]].map((v) => (+v).toString(16).padStart(2, "0")).join("") : DEFAULT_CUSTOM_PALETTE[f.key];
+  });
+  probe.remove();
+  return out;
+}
+
 function renderAppearanceModal() {
   const current = loadAppearance();
 
@@ -1649,22 +1709,27 @@ function renderAppearanceModal() {
       <div class="theme-swatch-grid" id="theme-swatch-grid">
         ${THEME_PRESETS.map((t) => `
           <button class="theme-swatch ${current.themeId === t.id ? "active" : ""}" data-theme="${t.id}">
-            <span class="theme-swatch-dot" style="background:${t.primary};"></span>
+            <span class="theme-swatch-dot" style="${t.id === "custom"
+              ? "background:conic-gradient(#e5484d,#f5a524,#46a758,#2bb3d9,#8e4ec6,#e5484d);"
+              : `background:linear-gradient(135deg,${t.c1} 50%,${t.c2} 50%);`}"></span>
             <span class="theme-swatch-label">${escapeHtml(t.name)}</span>
           </button>
         `).join("")}
       </div>
-    </div>
-
-    <div class="form-row">
-      <label>字體風格</label>
-      <div class="font-option-list" id="font-option-list">
-        ${FONT_PRESETS.map((f) => `
-          <button class="font-option-btn ${current.fontId === f.id ? "active" : ""}" data-font="${f.id}">
-            <span class="font-option-preview" style="font-family:${f.heading};">旅程 Aa</span>
-            <span class="font-option-name">${escapeHtml(f.name)}</span>
-          </button>
-        `).join("")}
+      <div class="palette-editor ${current.themeId === "custom" ? "" : "hidden"}" id="palette-editor">
+        <p class="palette-hint">點色塊挑選顏色，畫面會即時變化；按「還原」可回到你這次打開時的顏色。</p>
+        <div class="palette-grid">
+          ${PALETTE_FIELDS.map((f) => `
+            <label class="palette-item"><input type="color" data-key="${f.key}" value="${loadCustomPalette()[f.key]}"><span>${escapeHtml(f.label)}</span></label>
+          `).join("")}
+        </div>
+        <div class="form-actions" style="margin-top:12px;justify-content:flex-start;gap:8px;">
+          <select id="palette-base" aria-label="以哪個主題為起點">
+            ${THEME_PRESETS.filter((t) => t.id !== "custom").map((t) => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join("")}
+          </select>
+          <button class="secondary-btn" id="palette-copy-btn" type="button">以此主題為起點</button>
+          <button class="secondary-btn" id="palette-undo-btn" type="button">還原</button>
+        </div>
       </div>
     </div>
 
@@ -1688,18 +1753,44 @@ function renderAppearanceModal() {
     saveAppearance(settings);
     applyAppearance(settings);
   };
+  const editor = document.getElementById("palette-editor");
+  const paletteAtOpen = loadCustomPalette();
+  const syncPickers = (p) => editor.querySelectorAll('input[type="color"]').forEach((i) => { i.value = p[i.dataset.key]; });
 
   document.querySelectorAll("#theme-swatch-grid .theme-swatch").forEach((btn) => {
     btn.addEventListener("click", () => {
-      applyAndSave({ themeId: btn.dataset.theme });
+      const id = btn.dataset.theme;
+      // 第一次選「自訂」（還沒存過色盤）時，以目前畫面的顏色當起點
+      if (id === "custom" && !localStorage.getItem(LS_CUSTOM_PALETTE)) {
+        const snap = snapshotCurrentPalette();
+        saveCustomPalette(snap);
+        syncPickers(snap);
+      }
+      applyAndSave({ themeId: id });
+      editor.classList.toggle("hidden", id !== "custom");
       document.querySelectorAll("#theme-swatch-grid .theme-swatch").forEach((b) => b.classList.toggle("active", b === btn));
     });
   });
-  document.querySelectorAll("#font-option-list .font-option-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      applyAndSave({ fontId: btn.dataset.font });
-      document.querySelectorAll("#font-option-list .font-option-btn").forEach((b) => b.classList.toggle("active", b === btn));
+  editor.querySelectorAll('input[type="color"]').forEach((input) => {
+    input.addEventListener("input", () => {
+      const p = { ...loadCustomPalette(), [input.dataset.key]: input.value };
+      saveCustomPalette(p);
+      applyAndSave({ themeId: "custom" });
     });
+  });
+  document.getElementById("palette-copy-btn").addEventListener("click", () => {
+    // 先暫時套用選到的主題、讀出它的實際顏色，存成自訂色盤，再切回自訂
+    const base = document.getElementById("palette-base").value;
+    applyAppearance({ ...loadAppearance(), themeId: base });
+    const snap = snapshotCurrentPalette();
+    saveCustomPalette(snap);
+    syncPickers(snap);
+    applyAndSave({ themeId: "custom" });
+  });
+  document.getElementById("palette-undo-btn").addEventListener("click", () => {
+    saveCustomPalette(paletteAtOpen);
+    syncPickers(paletteAtOpen);
+    applyAndSave({ themeId: "custom" });
   });
   document.querySelectorAll("#size-option-row .size-option-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -1708,9 +1799,8 @@ function renderAppearanceModal() {
     });
   });
   document.getElementById("appearance-reset-btn").addEventListener("click", () => {
-    const defaults = { themeId: "ocean", fontId: "journal", sizeId: "md" };
-    saveAppearance(defaults);
-    applyAppearance(defaults);
+    saveAppearance({ themeId: "auto", sizeId: "md" });
+    applyAppearance({ themeId: "auto", sizeId: "md" });
     closeModal();
     renderAppearanceModal();
   });
