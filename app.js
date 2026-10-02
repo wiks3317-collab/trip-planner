@@ -2577,10 +2577,44 @@ function openConfirm(message, onConfirm) {
   };
 }
 
+// v21p11：24 小時制時間欄位。瀏覽器內建的 <input type="time"> 會依手機語系顯示 AM/PM，
+// 改用「時／分」兩個下拉選單，固定 00–23 時、00–59 分；時留「--」代表不填時間。
+function timeFieldHtml(id, value) {
+  const m = /^(\d{1,2}):(\d{2})/.exec(value || "");
+  const hh = m ? String(parseInt(m[1], 10)).padStart(2, "0") : "";
+  const mm = m ? m[2] : "00";
+  const hourOpts = ['<option value="">--</option>']
+    .concat(Array.from({ length: 24 }, (_, i) => {
+      const v = String(i).padStart(2, "0");
+      return `<option value="${v}"${v === hh ? " selected" : ""}>${v}</option>`;
+    })).join("");
+  const minOpts = Array.from({ length: 60 }, (_, i) => {
+    const v = String(i).padStart(2, "0");
+    return `<option value="${v}"${v === mm ? " selected" : ""}>${v}</option>`;
+  }).join("");
+  return `<div class="time-field" id="${id}"><select class="time-hh" aria-label="時">${hourOpts}</select><span class="time-colon">:</span><select class="time-mm" aria-label="分">${minOpts}</select></div>`;
+}
+function readTimeField(id) {
+  const el = document.getElementById(id);
+  if (!el) return "";
+  const hh = el.querySelector(".time-hh").value;
+  if (!hh) return "";
+  return `${hh}:${el.querySelector(".time-mm").value}`;
+}
+
+// v21p11：新增天數時，自動帶入「目前最後一天的日期 + 1 天」（最後一天沒填日期就留空）
+function nextDayDateDefault() {
+  const last = state.days[state.days.length - 1];
+  const m = last && /^(\d{4})-(\d{2})-(\d{2})$/.exec(last.date || "");
+  if (!m) return "";
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3] + 1));
+  return d.toISOString().slice(0, 10);
+}
+
 function renderAddDayModal() {
   openModal("新增天數", `
     <div class="form-row"><label>標題</label><input type="text" id="day-title" placeholder="例如：Day 1 抵達 &amp; 市區觀光"></div>
-    <div class="form-row"><label>日期（選填）</label><input type="date" id="day-date"></div>
+    <div class="form-row"><label>日期（選填）</label><input type="date" id="day-date" value="${nextDayDateDefault()}"></div>
     <div class="form-actions">
       <button class="secondary-btn" id="day-cancel">取消</button>
       <button class="primary-btn" id="day-confirm">新增</button>
@@ -2619,7 +2653,7 @@ function renderEditDayMetaModal(day) {
 function renderAddSpotModal(dayId) {
   openModal("新增時段／景點", `
     <div class="form-row"><label>景點／活動名稱</label><input type="text" id="spot-title" placeholder="例如：淺草寺"></div>
-    <div class="form-row"><label>時間（選填）</label><input type="time" id="spot-time"></div>
+    <div class="form-row"><label>時間（選填）</label>${timeFieldHtml("spot-time", "")}</div>
     <div class="form-actions">
       <button class="secondary-btn" id="spot-cancel">取消</button>
       <button class="primary-btn" id="spot-confirm">新增</button>
@@ -2628,7 +2662,7 @@ function renderAddSpotModal(dayId) {
   document.getElementById("spot-cancel").onclick = closeModal;
   document.getElementById("spot-confirm").onclick = async () => {
     const title = document.getElementById("spot-title").value.trim();
-    const time = document.getElementById("spot-time").value;
+    const time = readTimeField("spot-time");
     if (!title) return toast("請輸入名稱");
     closeModal();
     await createSpot(dayId, title, time);
@@ -3024,7 +3058,7 @@ function renderSpotDayPickerModal(sourceDayId, spot, mode) {
 function renderEditSpotMetaModal(dayId, spot) {
   openModal("編輯景點資訊", `
     <div class="form-row"><label>名稱</label><input type="text" id="spot-title" value="${escapeHtml(spot.title)}"></div>
-    <div class="form-row"><label>時間</label><input type="time" id="spot-time" value="${escapeHtml(spot.time || "")}"></div>
+    <div class="form-row"><label>時間</label>${timeFieldHtml("spot-time", spot.time || "")}</div>
     <div class="form-row">
       <label>Google 地圖連結（選填）</label>
       <input type="text" id="spot-mapurl" value="${escapeHtml(spot.mapUrl || "")}" placeholder="例如 https://maps.app.goo.gl/3yRm2VmBV6d4LFRN8">
@@ -3038,7 +3072,7 @@ function renderEditSpotMetaModal(dayId, spot) {
   document.getElementById("spot-cancel").onclick = closeModal;
   document.getElementById("spot-confirm").onclick = async () => {
     const title = document.getElementById("spot-title").value.trim();
-    const time = document.getElementById("spot-time").value;
+    const time = readTimeField("spot-time");
     const mapUrl = document.getElementById("spot-mapurl").value.trim();
     if (!title) return toast("請輸入名稱");
     await updateSpotMeta(dayId, spot.id, { title, time, mapUrl: mapUrl || null });
