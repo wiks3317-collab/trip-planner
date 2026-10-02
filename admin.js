@@ -585,7 +585,7 @@ async function showTripDetail(tripId) {
             <h1>${escapeHtml(trip.name || "（未命名）")}</h1>
             <p class="admin-muted">行程 ID：<code>${escapeHtml(trip.id)}</code>　建立時間：${fmtDate(trip.createdAt)}</p>
             ${disabled && trip.disabledReason ? `<p class="admin-muted">停用原因：${escapeHtml(trip.disabledReason)}</p>` : ""}
-            ${trip.deleted === true ? `<p class="admin-muted" style="color:#B3402A;">🗑️ 此行程已被刪除（一般使用者看不到，資料仍保留）${trip.deletedReason ? `　原因：${escapeHtml(trip.deletedReason)}` : ""}</p>` : ""}
+            ${trip.deleted === true ? `<p class="admin-muted" style="color:var(--danger,#B3402A);">🗑️ 此行程已被刪除（一般使用者看不到，資料仍保留）${trip.deletedReason ? `　原因：${escapeHtml(trip.deletedReason)}` : ""}</p>` : ""}
           </div>
           <div style="text-align:right;">
             <span class="admin-badge ${disabled ? "admin-badge-disabled" : "admin-badge-active"}">${disabled ? "已停用" : "啟用中"}</span><br/>
