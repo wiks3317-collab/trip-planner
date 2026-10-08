@@ -8,11 +8,22 @@ import { mapsApiKey } from "./maps-config.js";
 
 export const TRAVEL_ENABLED = typeof mapsApiKey === "string" && mapsApiKey.trim().length > 10;
 
+// gmaps：Google 地圖網址的 travelmode 參數；null 代表不帶參數（讓 Google 地圖自己挑「最佳」）
 export const TRAVEL_MODES = {
-  DRIVE:   { icon: "🚗", label: "開車",     gmaps: "driving" },
-  WALK:    { icon: "🚶", label: "走路",     gmaps: "walking" },
-  TRANSIT: { icon: "🚌", label: "大眾運輸", gmaps: "transit" },
+  BEST:        { icon: "✨", label: "最佳方案",   gmaps: null },
+  DRIVE:       { icon: "🚗", label: "開車",       gmaps: "driving" },
+  TRANSIT:     { icon: "🚌", label: "大眾運輸",   gmaps: "transit" },
+  WALK:        { icon: "🚶", label: "走路",       gmaps: "walking" },
+  BICYCLE:     { icon: "🚴", label: "騎單車",     gmaps: "bicycling" },
+  TWO_WHEELER: { icon: "🛵", label: "騎機車",     gmaps: null },
+  FLIGHT:      { icon: "✈️", label: "飛機",       gmaps: null }, // Google 沒有飛行時間的 API，只能手動填
 };
+export const DAY_MODE_KEYS = ["BEST", "DRIVE", "TRANSIT", "WALK", "BICYCLE", "TWO_WHEELER"];
+export const SEGMENT_MODE_KEYS = [...DAY_MODE_KEYS, "FLIGHT"];
+// Google 規定：走路／單車／機車路線屬測試版，顯示時必須提醒使用者
+export const BETA_MODES = new Set(["WALK", "BICYCLE", "TWO_WHEELER"]);
+// 「最佳方案」：走路在這個時間內就直接用走路（省 API 呼叫），否則比較開車與大眾運輸取最快
+export const BEST_WALK_MAX_SEC = 15 * 60;
 export function validMode(m) { return Object.prototype.hasOwnProperty.call(TRAVEL_MODES, m) ? m : null; }
 
 const ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes";
@@ -127,7 +138,7 @@ export async function computeRoute(fromEp, toEp, mode, when) {
     languageCode: LANG,
     units: "METRIC",
   };
-  if (mode === "DRIVE") body.routingPreference = "TRAFFIC_UNAWARE"; // 不看即時路況：計費較低，也比較穩定
+  if (mode === "DRIVE" || mode === "TWO_WHEELER") body.routingPreference = "TRAFFIC_UNAWARE"; // 只有這兩種可帶；不看即時路況：計費較低，也比較穩定
   if (mode === "TRANSIT" && when) Object.assign(body, when);
   const data = await gfetch(ROUTES_URL, { method: "POST", body, fieldMask: "routes.duration,routes.distanceMeters" });
   const r = data.routes && data.routes[0];
@@ -135,6 +146,29 @@ export async function computeRoute(fromEp, toEp, mode, when) {
   const seconds = Math.round(parseFloat(String(r.duration).replace("s", "")));
   if (!isFinite(seconds)) return null;
   return { seconds, meters: Math.round(r.distanceMeters || 0) };
+}
+
+// 「最佳方案」：Routes API 沒有這個選項，所以自己比較。回傳 { seconds, meters, usedMode, alts }
+export async function computeBest(fromEp, toEp, when) {
+  const alts = { WALK: null, DRIVE: null, TRANSIT: null };
+  const cands = [];
+  const take = (mode, r) => { alts[mode] = r ? r.seconds : null; if (r) cands.push({ mode, seconds: r.seconds, meters: r.meters }); };
+  const walk = await computeRoute(fromEp, toEp, "WALK");
+  take("WALK", walk);
+  if (walk && walk.seconds <= BEST_WALK_MAX_SEC) return { seconds: walk.seconds, meters: walk.meters, usedMode: "WALK", alts };
+  const [d, tr] = await Promise.allSettled([
+    computeRoute(fromEp, toEp, "DRIVE"),
+    computeRoute(fromEp, toEp, "TRANSIT", when),
+  ]);
+  if (d.status === "fulfilled") take("DRIVE", d.value);
+  if (tr.status === "fulfilled") take("TRANSIT", tr.value);
+  if (!cands.length) {
+    const failed = [d, tr].find((x) => x.status === "rejected");
+    if (failed) throw failed.reason;
+    return null;
+  }
+  cands.sort((a, b) => a.seconds - b.seconds);
+  return { seconds: cands[0].seconds, meters: cands[0].meters, usedMode: cands[0].mode, alts };
 }
 
 export function fmtDuration(sec) {
