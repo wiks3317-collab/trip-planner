@@ -817,8 +817,18 @@ h1, h2, h3 { font-family: var(--font-heading); }
 .travel-chip.static { cursor: default; }
 button.travel-chip:hover { border-color: var(--primary); }
 .travel-chip.travel-fail { color: var(--danger); }
-.travel-link, .travel-link-btn { font-size: 12px; color: var(--primary-dark); text-decoration: none; background: none; border: 0; padding: 0; cursor: pointer; font-family: inherit; }
-.travel-link:hover, .travel-link-btn:hover { text-decoration: underline; }
+.travel-link, .travel-link-btn {
+  display: inline-block; font: inherit; font-size: 12px; font-weight: 700;
+  color: var(--primary-dark); text-decoration: none; cursor: pointer;
+  background: var(--card-bg); border: 1px solid var(--border); border-radius: 999px; padding: 4px 11px;
+}
+.travel-link:hover, .travel-link-btn:hover { border-color: var(--primary); }
+.travel-note {
+  margin: 4px 0 10px; padding: 8px 12px; font-size: 12px; color: var(--text-muted);
+  background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.mode-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.mode-grid button { width: 100%; }
 
 /* 地點選擇器 */
 .place-chip { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 10px 12px; margin-bottom: 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-muted); }
