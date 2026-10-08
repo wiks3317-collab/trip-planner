@@ -5,9 +5,10 @@
 
 import { db, auth, authReady, offlineCacheMode } from "./firebase-config.js";
 import {
-  TRAVEL_ENABLED, TRAVEL_MODES, validMode, endpointFor, directionsLink, transitWhen, computeRoute,
+  TRAVEL_ENABLED, TRAVEL_MODES, DAY_MODE_KEYS, SEGMENT_MODE_KEYS, BETA_MODES, BEST_WALK_MAX_SEC,
+  validMode, endpointFor, directionsLink, transitWhen, computeRoute, computeBest,
   fmtDuration, fmtDistance, friendlyApiError, mountPlacePicker, placeTextSearch, parseMapUrlCoords,
-} from "./travel.js?v=21p13";
+} from "./travel.js?v=21p14";
 import {
   collection, doc, getDoc, getDocFromCache, getDocs,
   setDoc as rawSetDoc, updateDoc as rawUpdateDoc, deleteDoc as rawDeleteDoc,
@@ -1294,6 +1295,15 @@ function spotToPlace(spot) {
   if (!spot || typeof spot.lat !== "number" || typeof spot.lng !== "number") return null;
   return { placeId: spot.placeId || null, lat: spot.lat, lng: spot.lng, name: spot.placeName || "", address: spot.placeAddress || "", source: spot.placeSource || "picked" };
 }
+// 「在 Google 地圖上查看」的網址：優先用選定的地點；沒有的話退回舊的地圖連結，再退回用景點名稱搜尋
+function spotMapViewHref(spot) {
+  if (spot && typeof spot.lat === "number" && typeof spot.lng === "number") {
+    const coord = `${spot.lat},${spot.lng}`;
+    if (spot.placeId) return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(spot.placeName || coord)}&query_place_id=${encodeURIComponent(spot.placeId)}`;
+    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(coord)}`;
+  }
+  return resolveMapHref(spot && spot.mapUrl, null, spot && spot.title);
+}
 // 搜尋偏好中心：本日已有座標的景點的平均位置（讓「淺草寺」優先找到附近的，而不是同名的別處）
 function placeBias() {
   const pts = state.spots.map(endpointFor).filter((e) => e && e.lat != null);
@@ -2556,6 +2566,9 @@ function renderTripHome() {
     spotListEl.querySelectorAll("[data-seg-mode]").forEach((btn) => {
       btn.addEventListener("click", () => openSegmentModeModal(day.id, Number(btn.dataset.segMode)));
     });
+    spotListEl.querySelectorAll("[data-seg-flight]").forEach((btn) => {
+      btn.addEventListener("click", () => openFlightModal(day.id, Number(btn.dataset.segFlight)));
+    });
     spotListEl.querySelectorAll("[data-seg-retry]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const sg = segs[Number(btn.dataset.segRetry)];
@@ -2575,7 +2588,12 @@ function renderTripHome() {
       });
     });
     if (canEdit) enableDragReorder(spotListEl, ".spot-item", (from, to) => reorderSpotsByDrag(day.id, from, to));
-    if (day.showTravel) ensureTravelTimes(day, segs);
+    if (day.showTravel) {
+      if (travelNeedsBetaNote(segs)) {
+        spotListEl.insertAdjacentHTML("beforeend", `<div class="travel-note">⚠️ 走路、騎單車、騎機車的路線屬於 Google 的測試版資料，可能缺少完整的人行道或自行車道，請以現場為準。</div>`);
+      }
+      ensureTravelTimes(day, segs);
+    }
   }
 }
 
@@ -2594,14 +2612,28 @@ const travelWrittenAt = new Map();      // 段落 id → 上次寫入快取的�
 
 function segId(seg) { return seg.from.id + "|" + seg.key; }
 
+// 本日預設交通方式：沒設定過就是「最佳方案」（飛機只能逐段手動設定，不能當整天預設）
+function dayDefaultMode(day) {
+  const m = validMode(day && day.travelMode);
+  return m && m !== "FLIGHT" ? m : "BEST";
+}
+
 function buildSegments(day, spots) {
   const out = [];
   for (let i = 0; i < spots.length - 1; i++) {
     const from = spots[i], to = spots[i + 1];
     const fe = endpointFor(from), te = endpointFor(to);
     if (!fe || !te) { out.push(null); continue; }
-    const mode = validMode(from.travelModeToNext) || validMode(day.travelMode) || "DRIVE";
-    const when = mode === "TRANSIT" ? transitWhen(day.date, from.time, to.time) : null;
+    const mode = validMode(from.travelModeToNext) || dayDefaultMode(day);
+    if (mode === "FLIGHT") {
+      // 飛行時間 Google 沒有 API，由使用者手動填；只在「下一站沒變」時有效
+      const mn = from.travelManualToNext;
+      const manual = mn && mn.toId === to.id && mn.seconds > 0
+        ? { seconds: mn.seconds, meters: 0, noRoute: false, manual: true, usedMode: "FLIGHT" } : null;
+      out.push({ i, from, to, fe, te, mode, when: null, key: `FLIGHT|${to.id}`, cached: manual, approx: false });
+      continue;
+    }
+    const when = mode === "TRANSIT" || mode === "BEST" ? transitWhen(day.date, from.time, to.time) : null;
     const whenKey = when ? (when.arrivalTime ? "a" + when.arrivalTime : "d" + when.departureTime) : "";
     const key = `${mode}|${fe.key}>${te.key}|${whenKey}`;
     const cached = from.travelToNext && from.travelToNext.key === key ? from.travelToNext : null;
@@ -2610,26 +2642,49 @@ function buildSegments(day, spots) {
   return out;
 }
 
+function travelResultOf(seg) { return seg.cached || travelMem.get(segId(seg)) || null; }
+
+// 有任何一段「實際用到」走路／單車／機車 → 要顯示 Google 要求的測試版提醒
+function travelNeedsBetaNote(segs) {
+  return segs.some((seg) => {
+    if (!seg) return false;
+    const res = travelResultOf(seg);
+    if (!res || res.noRoute) return false;
+    return BETA_MODES.has(res.usedMode || seg.mode);
+  });
+}
+
 function travelRowHtml(seg, canEdit) {
   const id = segId(seg);
-  const m = TRAVEL_MODES[seg.mode];
-  const res = seg.cached || travelMem.get(id);
+  const res = travelResultOf(seg);
+  const isBest = seg.mode === "BEST";
+  let showMode = res && res.usedMode && TRAVEL_MODES[res.usedMode] ? res.usedMode : seg.mode;
+  if (!TRAVEL_MODES[showMode]) showMode = seg.mode;
+  const icon = isBest && showMode !== "BEST" ? TRAVEL_MODES.BEST.icon + TRAVEL_MODES[showMode].icon : TRAVEL_MODES[showMode].icon;
   const approxMark = seg.approx ? "≈ " : "";
-  let text, retry = false;
+  let text, retry = false, flightEmpty = false;
   if (res && res.noRoute) text = "查無路線";
   else if (res) text = `${approxMark}${fmtDuration(res.seconds)}${res.meters ? " · " + fmtDistance(res.meters) : ""}`;
+  else if (seg.mode === "FLIGHT") { text = "點此設定飛行時間"; flightEmpty = true; }
   else if (travelFailed.has(id)) { text = `無法取得（${travelFailed.get(id)}）`; retry = true; }
   else if (canEdit && TRAVEL_ENABLED && !isOffline()) text = "計算中…";
   else text = "尚未計算";
-  const chipInner = `${m.icon} ${escapeHtml(text)}${canEdit ? " ▾" : ""}`;
-  const tip = seg.approx ? "有一端是用景點名稱搜尋的，位置可能不準；編輯景點並選擇「地點」可提高準確度" : "";
+  const tips = [];
+  if (seg.approx) tips.push("有一端是用景點名稱搜尋的，位置可能不準；編輯景點並選擇「地點」可提高準確度");
+  if (isBest && res && res.alts) {
+    const parts = Object.keys(res.alts).map((k) => `${TRAVEL_MODES[k].label} ${res.alts[k] == null ? "無路線" : fmtDuration(res.alts[k])}`);
+    tips.push("比較：" + parts.join("、"));
+  }
+  if (seg.mode === "FLIGHT") tips.push("飛行時間為手動輸入");
+  const chipInner = `${icon} ${escapeHtml(text)}${canEdit ? " ▾" : ""}`;
+  const attr = retry ? `data-seg-retry="${seg.i}"` : (seg.mode === "FLIGHT" ? `data-seg-flight="${seg.i}"` : `data-seg-mode="${seg.i}"`);
   return `
     <div class="travel-row" data-travel-seg="${seg.i}">
       ${canEdit
-        ? `<button class="travel-chip${retry ? " travel-fail" : ""}" ${retry ? `data-seg-retry="${seg.i}"` : `data-seg-mode="${seg.i}"`} title="${escapeHtml(tip)}">${chipInner}</button>`
-        : `<span class="travel-chip static" title="${escapeHtml(tip)}">${chipInner}</span>`}
+        ? `<button class="travel-chip${retry ? " travel-fail" : ""}" ${attr} title="${escapeHtml(tips.join("\n"))}">${chipInner}</button>`
+        : `<span class="travel-chip static" title="${escapeHtml(tips.join("\n"))}">${chipInner}</span>`}
       ${retry && canEdit ? `<button class="travel-link-btn" data-seg-mode="${seg.i}">改方式</button>` : ""}
-      <a class="travel-link" href="${escapeHtml(directionsLink(seg.fe, seg.te, seg.mode))}" target="_blank" rel="noopener">在地圖看路線 ↗</a>
+      <a class="travel-link" href="${escapeHtml(directionsLink(seg.fe, seg.te, showMode))}" target="_blank" rel="noopener">在地圖看路線 ↗</a>
     </div>`;
 }
 
@@ -2637,7 +2692,7 @@ async function ensureTravelTimes(day, segs) {
   if (!TRAVEL_ENABLED || !canEditItinerary() || isOffline()) return;
   let anyFailed = false;
   for (const seg of segs) {
-    if (!seg || seg.cached) continue;
+    if (!seg || seg.cached || seg.mode === "FLIGHT") continue;
     const id = segId(seg);
     if (travelInflight.has(id)) continue;
     const mem = travelMem.get(id);
@@ -2652,8 +2707,12 @@ async function ensureTravelTimes(day, segs) {
     if (travelFailed.has(id)) continue;
     travelInflight.add(id);
     try {
-      const r = await computeRoute(seg.fe, seg.te, seg.mode, seg.when);
-      const res = r ? { seconds: r.seconds, meters: r.meters, noRoute: false } : { seconds: null, meters: null, noRoute: true };
+      const r = seg.mode === "BEST"
+        ? await computeBest(seg.fe, seg.te, seg.when)
+        : await computeRoute(seg.fe, seg.te, seg.mode, seg.when);
+      const res = r
+        ? { seconds: r.seconds, meters: r.meters, noRoute: false, usedMode: r.usedMode || seg.mode, alts: r.alts || null }
+        : { seconds: null, meters: null, noRoute: true, usedMode: seg.mode, alts: null };
       travelMem.set(id, res);
       travelWrittenAt.set(id, Date.now());
       await writeTravelCache(day.id, seg, res);
@@ -2669,7 +2728,10 @@ async function ensureTravelTimes(day, segs) {
 }
 function writeTravelCache(dayId, seg, res) {
   return updateSpotMeta(dayId, seg.from.id, {
-    travelToNext: { mode: seg.mode, key: seg.key, seconds: res.seconds, meters: res.meters, noRoute: !!res.noRoute, approx: !!seg.approx, at: Date.now() },
+    travelToNext: {
+      mode: seg.mode, key: seg.key, seconds: res.seconds, meters: res.meters, noRoute: !!res.noRoute,
+      usedMode: res.usedMode || seg.mode, alts: res.alts || null, approx: !!seg.approx, at: Date.now(),
+    },
   });
 }
 
@@ -2678,12 +2740,15 @@ function openSegmentModeModal(dayId, segIndex) {
   const from = state.spots[segIndex], to = state.spots[segIndex + 1];
   if (!day || !from || !to) return;
   const cur = validMode(from.travelModeToNext);
-  const dayMode = validMode(day.travelMode) || "DRIVE";
-  const opt = (val, label, active) => `<button class="${active ? "primary-btn" : "secondary-btn"} full-width" style="margin-bottom:8px;" data-set-mode="${val}">${label}</button>`;
+  const dm = dayDefaultMode(day);
+  const btn = (val, label, active, extra = "") => `<button class="${active ? "primary-btn" : "secondary-btn"}" ${extra} data-set-mode="${val}">${label}</button>`;
   openModal("這一段的交通方式", `
     <p style="font-size:13px;color:var(--text-muted);margin-top:0;">${escapeHtml(from.title)} → ${escapeHtml(to.title)}</p>
-    ${Object.keys(TRAVEL_MODES).map((k) => opt(k, `${TRAVEL_MODES[k].icon} ${TRAVEL_MODES[k].label}`, cur === k)).join("")}
-    ${opt("", `跟隨本日預設（${TRAVEL_MODES[dayMode].icon} ${TRAVEL_MODES[dayMode].label}）`, !cur)}
+    <div class="mode-grid">
+      ${SEGMENT_MODE_KEYS.map((k) => btn(k, `${TRAVEL_MODES[k].icon} ${TRAVEL_MODES[k].label}`, cur === k)).join("")}
+    </div>
+    ${btn("", `跟隨本日預設（${TRAVEL_MODES[dm].icon} ${TRAVEL_MODES[dm].label}）`, !cur, 'style="width:100%;margin-top:8px;"')}
+    <p style="font-size:12px;color:var(--text-muted);margin:10px 0 0;">✨ 最佳方案：走路 ${BEST_WALK_MAX_SEC / 60} 分鐘內就用走路，否則比較開車與大眾運輸取最快的。🛵 騎機車只有部分國家／地區有資料。✈️ Google 沒有提供飛行時間，需要自己填。</p>
     <div class="form-actions"><button class="secondary-btn" id="seg-cancel">取消</button></div>
   `);
   document.getElementById("seg-cancel").onclick = closeModal;
@@ -2691,15 +2756,49 @@ function openSegmentModeModal(dayId, segIndex) {
     b.addEventListener("click", async () => {
       const v = b.dataset.setMode || null;
       closeModal();
+      if (v === "FLIGHT") return openFlightModal(dayId, segIndex);
       await updateSpotMeta(dayId, from.id, { travelModeToNext: v });
     });
   });
 }
 
+function openFlightModal(dayId, segIndex) {
+  const from = state.spots[segIndex], to = state.spots[segIndex + 1];
+  if (!from || !to) return;
+  const mn = from.travelManualToNext && from.travelManualToNext.toId === to.id ? from.travelManualToNext.seconds : 0;
+  const h = Math.floor(mn / 3600), m = Math.round((mn % 3600) / 60);
+  openModal("✈️ 飛行時間", `
+    <p style="font-size:13px;color:var(--text-muted);margin-top:0;">${escapeHtml(from.title)} → ${escapeHtml(to.title)}</p>
+    <p style="font-size:12px;color:var(--text-muted);">Google 地圖沒有提供飛行時間的資料，請自己填（可參考航班時刻）。</p>
+    <div class="form-row">
+      <label>時間</label>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <input type="number" id="flt-h" min="0" max="48" value="${h}" style="width:80px;"> 小時
+        <input type="number" id="flt-m" min="0" max="59" value="${m}" style="width:80px;"> 分
+      </div>
+    </div>
+    <div class="form-actions">
+      <button class="secondary-btn" id="flt-other">改用其他方式</button>
+      <button class="secondary-btn" id="flt-cancel">取消</button>
+      <button class="primary-btn" id="flt-save">儲存</button>
+    </div>
+  `);
+  document.getElementById("flt-cancel").onclick = closeModal;
+  document.getElementById("flt-other").onclick = () => { closeModal(); openSegmentModeModal(dayId, segIndex); };
+  document.getElementById("flt-save").onclick = async () => {
+    const hh = Math.max(0, parseInt(document.getElementById("flt-h").value, 10) || 0);
+    const mm = Math.max(0, parseInt(document.getElementById("flt-m").value, 10) || 0);
+    const seconds = (hh * 60 + mm) * 60;
+    if (seconds <= 0) return toast("請輸入飛行時間");
+    closeModal();
+    await updateSpotMeta(dayId, from.id, { travelModeToNext: "FLIGHT", travelManualToNext: { seconds, toId: to.id } });
+  };
+}
+
 function openTravelSettingsModal(dayId) {
   const day = state.days.find((d) => d.id === dayId);
   if (!day) return;
-  const dayMode = validMode(day.travelMode) || "DRIVE";
+  const dayMode = dayDefaultMode(day);
   const missing = () => state.spots.filter((s) => { const e = endpointFor(s); return !e || e.kind === "text"; });
   openModal("🧭 交通時間設定", `
     ${TRAVEL_ENABLED ? "" : `<div class="readonly-banner" style="margin-bottom:12px;">尚未設定 Google Maps API 金鑰（maps-config.js），目前只能顯示已存在的資料。設定方式請看 README-交通時間.md。</div>`}
@@ -2711,16 +2810,16 @@ function openTravelSettingsModal(dayId) {
     <div class="form-row">
       <label>預設交通方式</label>
       <select id="travel-mode-select">
-        ${Object.keys(TRAVEL_MODES).map((k) => `<option value="${k}"${k === dayMode ? " selected" : ""}>${TRAVEL_MODES[k].icon} ${TRAVEL_MODES[k].label}</option>`).join("")}
+        ${DAY_MODE_KEYS.map((k) => `<option value="${k}"${k === dayMode ? " selected" : ""}>${TRAVEL_MODES[k].icon} ${TRAVEL_MODES[k].label}</option>`).join("")}
       </select>
-      <p style="font-size:12px;color:var(--text-muted);margin:6px 0 0;">每一段也可以單獨點交通時間改方式。大眾運輸會用景點的時間（需要本日有填日期）估算，未來的時間才會帶入。</p>
+      <p style="font-size:12px;color:var(--text-muted);margin:6px 0 0;">✨ 最佳方案：走路 ${BEST_WALK_MAX_SEC / 60} 分鐘內就用走路，否則比較開車與大眾運輸取最快的（每段最多呼叫 3 次 API）。每一段也可以單獨點交通時間改方式，包含飛機（需手動填時間）。大眾運輸會用景點的時間（需要本日有填日期）估算，未來的時間才會帶入。</p>
     </div>
     ${TRAVEL_ENABLED ? `
     <div class="form-row">
       <label>座標</label>
       <button class="secondary-btn full-width" id="travel-autofill-btn">📍 自動補齊本日景點座標（${missing().length} 個尚未指定地點）</button>
       <div id="travel-autofill-result" style="font-size:12px;color:var(--text-muted);margin-top:6px;white-space:pre-wrap;"></div>
-      <p style="font-size:12px;color:var(--text-muted);margin:6px 0 0;">會優先使用地圖「完整網址」裡的座標，其次用景點名稱搜尋。自動比對的結果請到各景點的「編輯」確認；沒指定地點的景點，交通時間會用名稱搜尋（標示 ≈）。</p>
+      <p style="font-size:12px;color:var(--text-muted);margin:6px 0 0;">會優先使用舊資料裡地圖「完整網址」的座標，其次用景點名稱搜尋。自動比對的結果請到各景點的「編輯」確認；沒指定地點的景點，交通時間會用名稱搜尋（標示 ≈）。</p>
     </div>` : ""}
     <div class="form-actions">
       <button class="secondary-btn" id="travel-cancel">取消</button>
@@ -2983,7 +3082,7 @@ function renderAddSpotModal(dayId) {
   openModal("新增時段／景點", `
     <div class="form-row"><label>景點／活動名稱</label><input type="text" id="spot-title" placeholder="例如：淺草寺"></div>
     <div class="form-row"><label>時間（選填）</label>${timeFieldHtml("spot-time", "")}</div>
-    ${TRAVEL_ENABLED ? `<div class="form-row"><label>地點（選填，用來計算交通時間）</label><div id="spot-place-picker"></div></div>` : ""}
+    ${TRAVEL_ENABLED ? `<div class="form-row"><label>地點（選填，用來計算交通時間與在地圖上查看）</label><div id="spot-place-picker"></div></div>` : ""}
     <div class="form-actions">
       <button class="secondary-btn" id="spot-cancel">取消</button>
       <button class="primary-btn" id="spot-confirm">新增</button>
@@ -3205,8 +3304,12 @@ function renderSpotPage() {
           </div>` : ""}
       </div>
       ${(() => {
-        const href = resolveMapHref(spot.mapUrl, null, spot.title);
-        return href ? `<a class="secondary-btn small-btn" href="${escapeHtml(href)}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:4px;margin-top:10px;text-decoration:none;">📍 在 Google 地圖上查看</a>` : "";
+        const href = spotMapViewHref(spot);
+        const hasPlace = typeof spot.lat === "number" && typeof spot.lng === "number";
+        const placeLine = hasPlace && (spot.placeName || spot.placeAddress)
+          ? `<div style="font-size:12px;color:var(--text-muted);margin-top:6px;">地點：${escapeHtml(spot.placeName || "")}${spot.placeAddress ? `（${escapeHtml(spot.placeAddress)}）` : ""}${spot.placeSource === "auto" && canEdit ? " · 自動比對，請按「編輯」確認是否正確" : ""}</div>`
+          : "";
+        return href ? `<a class="secondary-btn small-btn" href="${escapeHtml(href)}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:4px;margin-top:10px;text-decoration:none;">📍 在 Google 地圖上查看</a>${placeLine}` : "";
       })()}
       <div id="spot-blocks" style="margin-top:12px;"></div>
     </div>
@@ -3400,12 +3503,7 @@ function renderEditSpotMetaModal(dayId, spot) {
   openModal("編輯景點資訊", `
     <div class="form-row"><label>名稱</label><input type="text" id="spot-title" value="${escapeHtml(spot.title)}"></div>
     <div class="form-row"><label>時間</label>${timeFieldHtml("spot-time", spot.time || "")}</div>
-    <div class="form-row">
-      <label>Google 地圖連結（選填）</label>
-      <input type="text" id="spot-mapurl" value="${escapeHtml(spot.mapUrl || "")}" placeholder="例如 https://maps.app.goo.gl/3yRm2VmBV6d4LFRN8">
-    </div>
-    <p style="font-size:12px;color:var(--text-muted);margin:-6px 0 12px;">沒填的話，會用上面的「名稱」欄位到 Google 地圖搜尋</p>
-    ${TRAVEL_ENABLED ? `<div class="form-row"><label>地點（用來計算交通時間）</label><div id="spot-place-picker"></div></div>` : ""}
+    ${TRAVEL_ENABLED ? `<div class="form-row"><label>地點（用來計算交通時間，也是「在 Google 地圖上查看」的目的地）</label><div id="spot-place-picker"></div></div>` : ""}
     <div class="form-actions">
       <button class="secondary-btn" id="spot-cancel">取消</button>
       <button class="primary-btn" id="spot-confirm">儲存</button>
@@ -3422,9 +3520,8 @@ function renderEditSpotMetaModal(dayId, spot) {
   document.getElementById("spot-confirm").onclick = async () => {
     const title = document.getElementById("spot-title").value.trim();
     const time = readTimeField("spot-time");
-    const mapUrl = document.getElementById("spot-mapurl").value.trim();
     if (!title) return toast("請輸入名稱");
-    const data = { title, time, mapUrl: mapUrl || null };
+    const data = { title, time }; // 舊資料裡的 mapUrl 欄位不動（沒選地點時，「在 Google 地圖上查看」仍會沿用它）
     if (picker) Object.assign(data, placeToFields(picker.get())); // 沒開啟地圖功能時，不動既有的地點欄位
     await updateSpotMeta(dayId, spot.id, data);
     closeModal();
