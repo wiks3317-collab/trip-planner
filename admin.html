@@ -11,7 +11,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>%F0%9F%9B%A0%EF%B8%8F</text></svg>" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Noto+Sans+TC:wght@400;500;600;700&display=swap" rel="stylesheet" />
 <script src="theme-init.js?v=21p12"></script>
 <link rel="stylesheet" href="style.css" />
 <style>
@@ -22,8 +22,8 @@
   .admin-card {
     background: var(--card-bg, #fff);
     border: 1px solid var(--border, #DCE3DC);
-    border-radius: 12px;
-    padding: 24px;
+    border-radius: var(--radius-md, 10px);
+    padding: 24px 28px;
     max-width: 100%;
     overflow-x: hidden; /* 卡片本身絕不橫向溢出，內部個別表格自己捲動 */
   }
@@ -36,7 +36,7 @@
   .admin-muted { color: var(--text-muted, #5C6A61); font-size: 14px; line-height: 1.6; }
   .admin-topbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 8px; }
   .admin-primary-btn, .admin-secondary-btn {
-    font: inherit; cursor: pointer; border-radius: 8px; padding: 10px 16px; font-weight: 600;
+    font: inherit; cursor: pointer; border-radius: var(--radius-sm, 6px); padding: 10px 16px; font-weight: 600;
   }
   .admin-primary-btn { background: var(--primary, #0E6B64); color: var(--on-primary, #fff); border: none; margin-top: 12px; }
   .admin-primary-btn:hover { background: var(--primary-dark, #0A5450); }
@@ -52,7 +52,7 @@
      - 手機（窄螢幕）：改成「一列一張卡片」的直式排列（每個欄位變成一行 標籤：內容），
        這樣完全不需要左右滑動就能看到所有欄位，比橫向捲動更容易閱讀。 */
   .admin-table { width: 100%; min-width: 560px; border-collapse: collapse; font-size: 14px; }
-  .admin-table th, .admin-table td { text-align: left; padding: 8px 10px; border-bottom: 1px dashed var(--border, #DCE3DC); white-space: nowrap; }
+  .admin-table th, .admin-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border, #E4E7EA); white-space: nowrap; }
   .admin-table td:first-child, .admin-table th:first-child { white-space: normal; }
 
   @media (max-width: 680px) {
@@ -68,7 +68,7 @@
       padding: 4px 12px; margin-bottom: 10px;
     }
     .admin-table td {
-      border: none; border-bottom: 1px dashed var(--border, #DCE3DC);
+      border: none; border-bottom: 1px solid var(--border, #E4E7EA);
       padding: 8px 0; white-space: normal; text-align: right;
       display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;
     }
@@ -108,7 +108,7 @@
     color: var(--primary-dark, #0A5450); font-weight: 600; text-decoration: underline;
   }
   .admin-link-btn.admin-danger { color: var(--danger, #B3402A); }
-  .admin-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .admin-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }
   .admin-badge-active { background: color-mix(in srgb, var(--primary, #0E6B64) 15%, var(--card-bg, #fff)); color: var(--primary-dark, #0A5450); }
   .admin-badge-disabled { background: var(--danger-bg, #F6E3DE); color: var(--danger, #B3402A); }
 
@@ -136,6 +136,14 @@
     #admin-search { min-width: 0 !important; flex: 1 1 100% !important; }
     #admin-filter { flex: 1 1 100% !important; }
   }
+
+  /* v21p15：北歐簡約風（與主網頁、stock.html 一致） */
+  .admin-card h1 { font-weight: 600; letter-spacing: -0.01em; }
+  .admin-table th { color: var(--text-muted); font-weight: 500; font-size: 12px; }
+  .admin-table tbody tr:hover td { background: color-mix(in srgb, var(--text) 3%, transparent); }
+  #admin-theme-btn { border-radius: 10px; box-shadow: 0 4px 16px rgba(0,0,0,0.12); }
+  #admin-theme-panel { border-radius: var(--radius-md, 10px); box-shadow: 0 8px 32px rgba(0,0,0,0.14); }
+  .admin-card button:focus-visible, .admin-card a:focus-visible, #admin-theme-btn:focus-visible { outline: 2px solid var(--primary, #3d6079); outline-offset: 2px; }
 </style>
 </head>
 <body>
