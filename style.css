@@ -853,7 +853,7 @@ button:focus:not(:focus-visible) { outline: none; }
 
 /* 頂部列：內容對齊主欄寬度，半透明毛玻璃 */
 #app-header {
-  padding: 12px max(16px, calc((100% - 860px) / 2 + 16px));
+  padding: 12px max(14px, env(safe-area-inset-right)) 12px max(14px, env(safe-area-inset-left));
   background: color-mix(in srgb, var(--card-bg) 92%, transparent);
   -webkit-backdrop-filter: blur(12px);
   backdrop-filter: blur(12px);
@@ -872,16 +872,29 @@ button:focus:not(:focus-visible) { outline: none; }
 /* 內容區 */
 #app-root { padding: 24px clamp(16px, 4vw, 32px) 80px; }
 .card { padding: 20px; margin-bottom: 16px; }
-.section-title { display: block; margin: 28px 0 10px; padding: 0; font-size: 15px; background: none; border: 0; border-radius: 0; }
+.section-title { margin: 28px 0 10px; padding: 6px 14px; font-size: 15px; }
 .day-selector-btn { border-left: 1px solid var(--border); }
 .status-tag, .currency-tag, .member-pick-btn .perm-tag { border-radius: 4px; }
 .toast { border-radius: 8px; }
 
 /* 行程／記帳頁籤：底線式 */
-.tabs { gap: 4px; padding: 0; background: none; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; }
-.tab-btn { padding: 11px 8px; border-radius: 0; }
+.tabs { gap: 4px; padding: 4px; background: var(--card-bg); border: 0; border-radius: var(--radius-md); }
+.tab-btn { padding: 9px; border-radius: var(--radius-sm); }
 .tab-btn:hover { color: var(--text); }
-.tab-btn.active { background: none; color: var(--text); box-shadow: inset 0 -2px 0 var(--primary); }
+.tab-btn.active { background: var(--primary); color: var(--on-primary); }
+
+/* 交通時間列（時間＋在地圖看路線）：整列放進一個有色方框，不再有左側線條 */
+.travel-row { margin: -3px 0 9px; padding: 8px 10px; background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.travel-link, .travel-link-btn { background: var(--surface-muted); }
+
+/* 消費明細：每個日期（含當日小計）的標題列做成有色方框。
+   app.js 這一列沒有 class（只有 inline style），所以用結構選取：#expense-list > 日期群組 > 第一個 div。 */
+#expense-list > div > div:first-child {
+  padding: 8px 12px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
 
 /* 表單 */
 .form-row input:focus, .form-row select:focus, .form-row textarea:focus {
