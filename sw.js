@@ -15,7 +15,7 @@
 // ⚠️ 每次發新版時，請同步修改下面的 VERSION（與 index.html／boot.js 的 ?v= 一致），
 //    瀏覽器才會發現 sw.js 有更新、換上新的快取。
 // ============================================================
-const VERSION = "21p14";
+const VERSION = "21p15";
 const APP_CACHE = "trip-app-" + VERSION;
 const LIB_CACHE = "trip-lib-1";
 const NETWORK_TIMEOUT_MS = 3000;
