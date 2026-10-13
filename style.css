@@ -3,43 +3,43 @@
      預設＝淺色。「跟隨系統」在系統為深色時自動套用深色；其餘主題由 <html data-theme="..."> 決定；
      「自訂」由 JS 直接在 <html style> 寫入下列變數。 */
   color-scheme: light;
-  --bg: #f6f7f9;
+  --bg: #f4f5f6;
   --card-bg: #ffffff;
-  --text: #1f2328;
-  --text-muted: #6b7280;
-  --border: #d0d7de;
-  --surface-muted: #eef0f3;
-  --primary: #2563eb;
+  --text: #20262b;
+  --text-muted: #75808a;
+  --border: #e4e7ea;
+  --surface-muted: #eceff1;
+  --primary: #3d6079;
   --on-primary: #ffffff;
-  --accent: #D98E2B;
-  --danger: #C4432E;
+  --accent: #c8963e;
+  --danger: #b94a3f;
   /* 以下由上面的色彩自動推導，主題與自訂色盤都不用另外設定 */
   --primary-dark: color-mix(in srgb, var(--primary) 78%, var(--text));
   --danger-bg: color-mix(in srgb, var(--danger) 12%, var(--card-bg));
 
   /* ---- 字體：全站統一 Noto Sans TC ---- */
-  --font-heading: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
-  --font-body: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+  --font-heading: "Inter", "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+  --font-body: "Inter", "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
   --base-font-size: 16px;
 
-  --radius-sm: 8px;
-  --radius-md: 14px;
-  --radius-lg: 22px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
 }
 @media (prefers-color-scheme: dark) {
   html:not([data-theme]) {
     color-scheme: dark;
-    --bg: #0f1115; --card-bg: #171a21; --text: #e6e8eb; --text-muted: #9aa3af;
-    --border: #2d333b; --surface-muted: #1e232b; --primary: #4c8dff; --on-primary: #ffffff;
-    --accent: #E8A33D; --danger: #f2837a;
+    --bg: #13171a; --card-bg: #1a1f23; --text: #e5e9ec; --text-muted: #8a949c;
+    --border: #2a3136; --surface-muted: #232a2f; --primary: #8db4cf; --on-primary: #10171c;
+    --accent: #d9a441; --danger: #ec6a64;
   }
 }
 html[data-theme="light"] { color-scheme: light; }
 html[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #0f1115; --card-bg: #171a21; --text: #e6e8eb; --text-muted: #9aa3af;
-  --border: #2d333b; --surface-muted: #1e232b; --primary: #4c8dff; --on-primary: #ffffff;
-  --accent: #E8A33D; --danger: #f2837a;
+  --bg: #13171a; --card-bg: #1a1f23; --text: #e5e9ec; --text-muted: #8a949c;
+  --border: #2a3136; --surface-muted: #232a2f; --primary: #8db4cf; --on-primary: #10171c;
+  --accent: #d9a441; --danger: #ec6a64;
 }
 html[data-theme="sepia"] {
   color-scheme: light;
@@ -105,7 +105,7 @@ h1, h2, h3 { font-family: var(--font-heading); }
   gap: 10px;
   padding: 12px 14px;
   background: var(--card-bg);
-  border-bottom: 1px dashed var(--border);
+  border-bottom: 1px solid var(--border);
 }
 #header-title {
   flex: 1;
@@ -116,7 +116,7 @@ h1, h2, h3 { font-family: var(--font-heading); }
 }
 #header-trip-name {
   font-family: var(--font-heading);
-  font-weight: 700;
+  font-weight: 600;
   font-size: 19px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -135,9 +135,9 @@ h1, h2, h3 { font-family: var(--font-heading); }
   color: var(--primary-dark);
   border: none;
   padding: 6px 12px;
-  border-radius: 999px;
+  border-radius: 6px;
   font-size: 12.5px;
-  font-weight: 700;
+  font-weight: 600;
   white-space: nowrap;
 }
 .icon-btn {
@@ -146,7 +146,7 @@ h1, h2, h3 { font-family: var(--font-heading); }
   font-size: 18px;
   line-height: 1;
   padding: 7px 9px;
-  border-radius: 999px;
+  border-radius: 6px;
   color: var(--text);
 }
 .icon-btn:hover { background: var(--bg); }
@@ -155,7 +155,7 @@ h1, h2, h3 { font-family: var(--font-heading); }
 #menu-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(20,25,22,0.4);
+  background: rgba(20,26,31,0.45);
   z-index: 60;
   animation: fadeIn 0.15s ease-out;
 }
@@ -183,7 +183,7 @@ h1, h2, h3 { font-family: var(--font-heading); }
   justify-content: space-between;
   align-items: center;
   padding: 16px;
-  border-bottom: 1px dashed var(--border);
+  border-bottom: 1px solid var(--border);
 }
 .menu-header h3 {
   margin: 0;
@@ -210,11 +210,11 @@ h1, h2, h3 { font-family: var(--font-heading); }
 #trip-list li.active {
   background: color-mix(in srgb, var(--primary) 12%, var(--card-bg));
   color: var(--primary-dark);
-  font-weight: 700;
+  font-weight: 600;
 }
 .menu-footer {
   padding: 12px;
-  border-top: 1px dashed var(--border);
+  border-top: 1px solid var(--border);
 }
 #new-trip-btn { margin: 0 12px 12px; width: calc(100% - 24px); }
 /* v21p9：行程設定清單 */
@@ -260,7 +260,7 @@ h1, h2, h3 { font-family: var(--font-heading); }
   padding: 11px 16px;
   border-radius: var(--radius-sm);
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 600;
   transition: background 0.12s;
 }
 .primary-btn:hover { background: var(--primary-dark); }
@@ -272,7 +272,7 @@ h1, h2, h3 { font-family: var(--font-heading); }
   padding: 10px 16px;
   border-radius: var(--radius-sm);
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 600;
 }
 .secondary-btn:hover { border-color: var(--primary); color: var(--primary-dark); }
 .danger-btn {
@@ -282,7 +282,7 @@ h1, h2, h3 { font-family: var(--font-heading); }
   padding: 8px 14px;
   border-radius: var(--radius-sm);
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 600;
 }
 .full-width { width: 100%; }
 .small-btn { padding: 6px 11px; font-size: 12.5px; border-radius: 7px; }
@@ -307,13 +307,13 @@ h1, h2, h3 { font-family: var(--font-heading); }
   display: inline-block;
   font-family: var(--font-heading);
   font-size: 17px;
-  font-weight: 700;
+  font-weight: 600;
   margin: 24px 0 10px;
   padding: 5px 14px;
   color: var(--text);
   background: var(--card-bg);
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 6px;
 }
 
 .breadcrumb {
@@ -341,7 +341,7 @@ h1, h2, h3 { font-family: var(--font-heading); }
   margin-bottom: 16px;
   background: var(--card-bg);
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 6px;
   padding: 4px;
 }
 .tab-btn {
@@ -349,9 +349,9 @@ h1, h2, h3 { font-family: var(--font-heading); }
   border: none;
   background: none;
   padding: 9px;
-  border-radius: 999px;
+  border-radius: 6px;
   font-size: 13.5px;
-  font-weight: 700;
+  font-weight: 600;
   color: var(--text-muted);
 }
 .tab-btn.active { background: var(--primary); color: var(--on-primary); }
@@ -372,14 +372,14 @@ h1, h2, h3 { font-family: var(--font-heading); }
 }
 .day-selector-num {
   font-family: var(--font-heading);
-  font-weight: 700;
+  font-weight: 600;
   font-size: 15px;
   color: var(--primary-dark);
   flex-shrink: 0;
 }
 .day-selector-title {
   flex: 1;
-  font-weight: 700;
+  font-weight: 600;
   font-size: 15px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -410,13 +410,13 @@ h1, h2, h3 { font-family: var(--font-heading); }
   align-items: center;
   justify-content: center;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
   flex-shrink: 0;
 }
 .day-select-item.active .day-select-num { background: var(--primary); color: var(--on-primary); }
 .day-select-text { display: flex; flex-direction: column; cursor: pointer; flex: 1; }
 .day-select-num { cursor: pointer; }
-.day-select-title { font-weight: 700; font-size: 14.5px; }
+.day-select-title { font-weight: 600; font-size: 14.5px; }
 .day-select-date { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
 
 /* ================= Spot list (itinerary timeline) ================= */
@@ -431,8 +431,8 @@ h1, h2, h3 { font-family: var(--font-heading); }
   background: var(--card-bg);
 }
 .spot-item:hover { border-color: var(--primary); }
-.spot-time { flex: 0 0 60px; font-size: 12.5px; font-weight: 700; color: var(--primary-dark); }
-.spot-title { flex: 1; font-weight: 700; cursor: pointer; font-size: 14.5px; }
+.spot-time { flex: 0 0 60px; font-size: 12.5px; font-weight: 600; color: var(--primary-dark); }
+.spot-title { flex: 1; font-weight: 600; cursor: pointer; font-size: 14.5px; }
 
 .reorder-col { display: flex; flex-direction: column; gap: 2px; flex-shrink: 0; }
 .reorder-btn {
@@ -474,7 +474,7 @@ h1, h2, h3 { font-family: var(--font-heading); }
   border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--card-bg));
   margin-bottom: 8px;
 }
-.wish-author { font-size: 12px; font-weight: 700; color: color-mix(in srgb, var(--accent) 70%, var(--text)); }
+.wish-author { font-size: 12px; font-weight: 600; color: color-mix(in srgb, var(--accent) 70%, var(--text)); }
 .wish-text { font-size: 14px; margin-top: 3px; white-space: pre-wrap; }
 .wish-image { margin-top: 8px; }
 .wish-image img { max-width: 100%; max-height: 320px; object-fit: cover; border-radius: var(--radius-sm); display: block; }
@@ -488,7 +488,7 @@ h1, h2, h3 { font-family: var(--font-heading); }
   margin-bottom: 8px;
   background: var(--card-bg);
 }
-.expense-top { display: flex; justify-content: space-between; font-weight: 700; font-size: 14.5px; }
+.expense-top { display: flex; justify-content: space-between; font-weight: 600; font-size: 14.5px; }
 .expense-fx { font-size: 12px; color: var(--text-muted); margin-top: 3px; }
 .expense-fx-missing { color: color-mix(in srgb, var(--accent) 65%, var(--text)); }
 .expense-meta { font-size: 12px; color: var(--text-muted); margin-top: 5px; }
@@ -496,11 +496,11 @@ h1, h2, h3 { font-family: var(--font-heading); }
 .currency-tag {
   display: inline-block;
   font-size: 10.5px;
-  font-weight: 700;
+  font-weight: 600;
   color: var(--primary-dark);
   background: color-mix(in srgb, var(--primary) 12%, var(--card-bg));
   padding: 1px 6px;
-  border-radius: 999px;
+  border-radius: 6px;
   margin-left: 4px;
   vertical-align: middle;
 }
@@ -511,7 +511,7 @@ h1, h2, h3 { font-family: var(--font-heading); }
   padding: 14px 16px;
   margin-bottom: 12px;
 }
-.fx-status-title { font-size: 13px; font-weight: 700; color: var(--text-muted); margin-bottom: 6px; }
+.fx-status-title { font-size: 13px; font-weight: 600; color: var(--text-muted); margin-bottom: 6px; }
 .fx-status-row {
   display: flex;
   justify-content: space-between;
@@ -520,12 +520,12 @@ h1, h2, h3 { font-family: var(--font-heading); }
   padding: 5px 0;
 }
 .fx-updated { font-size: 11px; color: var(--text-muted); }
-.fx-missing { color: color-mix(in srgb, var(--accent) 65%, var(--text)); font-weight: 700; }
+.fx-missing { color: color-mix(in srgb, var(--accent) 65%, var(--text)); font-weight: 600; }
 .balance-row {
   display: flex;
   justify-content: space-between;
   padding: 9px 0;
-  border-bottom: 1px dashed var(--border);
+  border-bottom: 1px solid var(--border);
   font-size: 14px;
 }
 .balance-row:last-child { border-bottom: none; }
@@ -533,7 +533,7 @@ h1, h2, h3 { font-family: var(--font-heading); }
 
 /* ================= Forms ================= */
 .form-row { margin-bottom: 13px; }
-.form-row label { display: block; font-size: 13px; font-weight: 700; margin-bottom: 5px; color: var(--text-muted); }
+.form-row label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 5px; color: var(--text-muted); }
 .form-row input[type=text],
 .form-row input[type=number],
 .form-row input[type=date],
@@ -554,7 +554,7 @@ h1, h2, h3 { font-family: var(--font-heading); }
 .checkbox-group { display: flex; flex-wrap: wrap; gap: 8px; }
 .checkbox-chip {
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 6px;
   padding: 7px 13px;
   font-size: 13px;
   font-weight: 600;
@@ -569,7 +569,7 @@ h1, h2, h3 { font-family: var(--font-heading); }
 #modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(20,25,22,0.42);
+  background: rgba(20,26,31,0.45);
   z-index: 100;
   display: flex;
   align-items: flex-end;
@@ -583,20 +583,20 @@ h1, h2, h3 { font-family: var(--font-heading); }
   max-width: 480px;
   max-height: 90vh;
   overflow-y: auto;
-  border-radius: 20px 20px 0 0;
+  border-radius: 14px 14px 0 0;
   padding: 20px;
   animation: sheetUp 0.18s cubic-bezier(.2,.8,.3,1);
 }
 @keyframes sheetUp { from { transform: translateY(24px); opacity: 0.4; } to { transform: translateY(0); opacity: 1; } }
 @media (min-width: 640px) { #modal-box { border-radius: var(--radius-lg); } }
-.modal-title { font-family: var(--font-heading); font-size: 18px; font-weight: 700; margin: 0 0 14px; }
+.modal-title { font-family: var(--font-heading); font-size: 18px; font-weight: 600; margin: 0 0 14px; }
 
 /* ================= 景點詳細面板 ================= */
 #spot-panel-overlay {
   position: fixed;
   inset: 0;
   z-index: 90;
-  background: rgba(20,25,22,0.42);
+  background: rgba(20,26,31,0.45);
   animation: fadeIn 0.15s ease-out;
 }
 #spot-panel-box {
@@ -606,7 +606,7 @@ h1, h2, h3 { font-family: var(--font-heading); }
   bottom: 0;
   top: 6vh;
   background: var(--card-bg);
-  border-radius: 20px 20px 0 0;
+  border-radius: 14px 14px 0 0;
   display: flex;
   flex-direction: column;
   animation: sheetUp 0.2s cubic-bezier(.2,.8,.3,1);
@@ -621,17 +621,17 @@ h1, h2, h3 { font-family: var(--font-heading); }
   display: flex;
   align-items: center;
   padding: 12px 10px;
-  border-bottom: 1px dashed var(--border);
+  border-bottom: 1px solid var(--border);
 }
 #spot-panel-close {
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 600;
   padding: 8px 12px;
-  border-radius: 999px;
+  border-radius: 6px;
 }
 #spot-panel-header-title {
   font-family: var(--font-heading);
-  font-weight: 700;
+  font-weight: 600;
   font-size: 15px;
   margin-left: 6px;
   overflow: hidden;
@@ -660,7 +660,7 @@ h1, h2, h3 { font-family: var(--font-heading); }
   background: var(--text);
   color: var(--on-primary);
   padding: 10px 18px;
-  border-radius: 999px;
+  border-radius: 6px;
   font-size: 13px;
   box-shadow: 0 4px 14px rgba(0,0,0,0.22);
 }
@@ -675,25 +675,25 @@ h1, h2, h3 { font-family: var(--font-heading); }
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   font-size: 15px;
-  font-weight: 700;
+  font-weight: 600;
   background: var(--card-bg);
 }
 .member-pick-btn.active { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 8%, var(--card-bg)); }
 .member-pick-btn .perm-tag {
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
   color: var(--text-muted);
   background: var(--bg);
   padding: 3px 9px;
-  border-radius: 999px;
+  border-radius: 6px;
 }
 
 .status-tag {
   display: inline-block;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
   padding: 3px 9px;
-  border-radius: 999px;
+  border-radius: 6px;
   background: var(--bg);
   color: var(--text-muted);
 }
@@ -754,7 +754,7 @@ h1, h2, h3 { font-family: var(--font-heading); }
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--card-bg);
-  font-weight: 700;
+  font-weight: 600;
   font-size: 13px;
 }
 .size-option-btn.active { border-color: var(--primary); color: var(--primary-dark); background: color-mix(in srgb, var(--primary) 8%, var(--card-bg)); }
@@ -782,14 +782,14 @@ h1, h2, h3 { font-family: var(--font-heading); }
 .offline-actions { display: grid; gap: 8px; }
 .offline-note { font-size: 12.5px; color: var(--text-muted); line-height: 1.5; }
 .offline-help { margin-top: 12px; font-size: 13.5px; }
-.offline-help summary { cursor: pointer; font-weight: 700; }
+.offline-help summary { cursor: pointer; font-weight: 600; }
 .offline-help ul { padding-left: 18px; margin: 8px 0 0; display: grid; gap: 6px; line-height: 1.55; }
-.offline-danger { margin-top: 16px; padding-top: 12px; border-top: 1px dashed var(--border); display: grid; gap: 6px; justify-items: start; }
+.offline-danger { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); display: grid; gap: 6px; justify-items: start; }
 
 /* v21p11：24 小時制時間欄位（時：分 兩個下拉） */
 .time-field { display: flex; align-items: center; gap: 8px; }
 .time-field select { flex: 1; min-width: 0; }
-.time-field .time-colon { font-weight: 700; color: var(--text-muted); }
+.time-field .time-colon { font-weight: 600; color: var(--text-muted); }
 
 /* v21p12：自訂色盤 */
 .palette-editor { margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-muted); }
@@ -806,21 +806,21 @@ h1, h2, h3 { font-family: var(--font-heading); }
 .travel-row {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   margin: -3px 0 9px 22px; padding: 2px 0 2px 14px;
-  border-left: 2px dashed var(--border);
+  border-left: 2px solid var(--border);
   font-size: 12.5px; color: var(--text-muted);
 }
 .travel-chip {
-  font: inherit; font-size: 12.5px; font-weight: 700; color: var(--text);
-  background: var(--surface-muted); border: 1px solid var(--border); border-radius: 999px;
+  font: inherit; font-size: 12.5px; font-weight: 600; color: var(--text);
+  background: var(--surface-muted); border: 1px solid var(--border); border-radius: 6px;
   padding: 4px 11px; cursor: pointer;
 }
 .travel-chip.static { cursor: default; }
 button.travel-chip:hover { border-color: var(--primary); }
 .travel-chip.travel-fail { color: var(--danger); }
 .travel-link, .travel-link-btn {
-  display: inline-block; font: inherit; font-size: 12px; font-weight: 700;
+  display: inline-block; font: inherit; font-size: 12px; font-weight: 600;
   color: var(--primary-dark); text-decoration: none; cursor: pointer;
-  background: var(--card-bg); border: 1px solid var(--border); border-radius: 999px; padding: 4px 11px;
+  background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px; padding: 4px 11px;
 }
 .travel-link:hover, .travel-link-btn:hover { border-color: var(--primary); }
 .travel-note {
@@ -843,3 +843,57 @@ button.travel-chip:hover { border-color: var(--primary); }
 .place-suggest-item span { font-size: 12px; color: var(--text-muted); }
 .place-hint { font-size: 12px; color: var(--text-muted); margin-top: 5px; min-height: 0; }
 .place-input-row input { width: 100%; }
+
+/* ================= v21p15：北歐簡約風（與 stock.html 同一套設計）=================
+   以下是整體收斂用的覆寫；上方的色票、圓角、字體、字重已一併調整。
+   不想要頁籤的底線式等細部風格，可直接刪掉這一整段。 */
+body { line-height: 1.6; font-variant-numeric: tabular-nums; }
+:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+button:focus:not(:focus-visible) { outline: none; }
+
+/* 頂部列：內容對齊主欄寬度，半透明毛玻璃 */
+#app-header {
+  padding: 12px max(16px, calc((100% - 860px) / 2 + 16px));
+  background: color-mix(in srgb, var(--card-bg) 92%, transparent);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+#header-trip-name { font-size: 18px; letter-spacing: -0.01em; }
+.icon-btn { border-radius: 8px; color: var(--text-muted); }
+.icon-btn:hover { background: var(--surface-muted); color: var(--text); }
+#current-member-badge { background: var(--surface-muted); color: var(--text); font-weight: 500; }
+
+/* 左側選單與浮層 */
+#trip-menu { box-shadow: 0 8px 32px rgba(0, 0, 0, 0.14); }
+#trip-list li:hover { background: var(--surface-muted); }
+#trip-list li.active { background: var(--surface-muted); color: var(--text); box-shadow: inset 2px 0 0 var(--primary); }
+#menu-overlay, #modal-overlay, #spot-panel-overlay { -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px); }
+
+/* 內容區 */
+#app-root { padding: 24px clamp(16px, 4vw, 32px) 80px; }
+.card { padding: 20px; margin-bottom: 16px; }
+.section-title { display: block; margin: 28px 0 10px; padding: 0; font-size: 15px; background: none; border: 0; border-radius: 0; }
+.day-selector-btn { border-left: 1px solid var(--border); }
+.status-tag, .currency-tag, .member-pick-btn .perm-tag { border-radius: 4px; }
+.toast { border-radius: 8px; }
+
+/* 行程／記帳頁籤：底線式 */
+.tabs { gap: 4px; padding: 0; background: none; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; }
+.tab-btn { padding: 11px 8px; border-radius: 0; }
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active { background: none; color: var(--text); box-shadow: inset 0 -2px 0 var(--primary); }
+
+/* 表單 */
+.form-row input:focus, .form-row select:focus, .form-row textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent);
+}
+@media (max-width: 640px) {
+  /* 16px 以上 iOS 才不會在點輸入欄位時自動放大畫面 */
+  .form-row input[type=text], .form-row input[type=number], .form-row input[type=date],
+  .form-row input[type=time], .form-row input[type=datetime-local], .form-row select, .form-row textarea { font-size: 16px; }
+}
+@media (pointer: coarse) {
+  .icon-btn { padding: 10px 11px; }
+}
