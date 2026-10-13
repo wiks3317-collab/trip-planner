@@ -144,6 +144,25 @@
   #admin-theme-btn { border-radius: 10px; box-shadow: 0 4px 16px rgba(0,0,0,0.12); }
   #admin-theme-panel { border-radius: var(--radius-md, 10px); box-shadow: 0 8px 32px rgba(0,0,0,0.14); }
   .admin-card button:focus-visible, .admin-card a:focus-visible, #admin-theme-btn:focus-visible { outline: 2px solid var(--primary, #3d6079); outline-offset: 2px; }
+
+  /* v21p16：緊湊版面（減少四周留白，內容欄加寬；只改間距不改配色） */
+  body { padding: 12px 10px; }
+  #admin-root { max-width: 1200px; }
+  .admin-card { padding: 16px 18px; }
+  .admin-table-scroll { margin-top: 10px; }
+  .admin-table th, .admin-table td { padding: 6px 8px; }
+  .admin-uid-box { margin: 6px 0 10px; }
+  .admin-primary-btn { margin-top: 8px; }
+  .admin-section-title { margin: 16px 0 6px; }
+  .admin-day-block { padding: 8px 10px; margin-bottom: 8px; }
+  .admin-spot-block { margin: 8px 0 0 8px; padding: 6px 0 6px 10px; }
+  .admin-wish { padding: 6px 8px; margin-bottom: 4px; }
+  #admin-theme-btn { right: 12px; bottom: 12px; }
+  #admin-theme-panel { right: 12px; bottom: 64px; padding: 10px; }
+  @media (max-width: 600px) {
+    body { padding: 8px 6px; }
+    .admin-card { padding: 12px 10px; }
+  }
 </style>
 </head>
 <body>

@@ -846,14 +846,14 @@ button.travel-chip:hover { border-color: var(--primary); }
 
 /* ================= v21p15：北歐簡約風（與 stock.html 同一套設計）=================
    以下是整體收斂用的覆寫；上方的色票、圓角、字體、字重已一併調整。
-   不想要頁籤的底線式等細部風格，可直接刪掉這一整段。 */
+   不想要的細部風格，可直接刪掉對應那幾行。 */
 body { line-height: 1.6; font-variant-numeric: tabular-nums; }
 :focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 button:focus:not(:focus-visible) { outline: none; }
 
-/* 頂部列：內容對齊主欄寬度，半透明毛玻璃 */
+/* 頂部列：左右按鈕貼齊畫面兩端，半透明毛玻璃 */
 #app-header {
-  padding: 12px max(14px, env(safe-area-inset-right)) 12px max(14px, env(safe-area-inset-left));
+  padding: 8px max(12px, env(safe-area-inset-right)) 8px max(12px, env(safe-area-inset-left));
   background: color-mix(in srgb, var(--card-bg) 92%, transparent);
   -webkit-backdrop-filter: blur(12px);
   backdrop-filter: blur(12px);
@@ -870,21 +870,21 @@ button:focus:not(:focus-visible) { outline: none; }
 #menu-overlay, #modal-overlay, #spot-panel-overlay { -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px); }
 
 /* 內容區 */
-#app-root { padding: 24px clamp(16px, 4vw, 32px) 80px; }
-.card { padding: 20px; margin-bottom: 16px; }
-.section-title { margin: 28px 0 10px; padding: 6px 14px; font-size: 15px; }
+#app-root { max-width: 1100px; padding: 12px clamp(8px, 2vw, 20px) 48px; }
+.card { padding: 14px 16px; margin-bottom: 10px; }
+.section-title { margin: 18px 0 8px; padding: 6px 14px; font-size: 15px; }
 .day-selector-btn { border-left: 1px solid var(--border); }
 .status-tag, .currency-tag, .member-pick-btn .perm-tag { border-radius: 4px; }
 .toast { border-radius: 8px; }
 
-/* 行程／記帳頁籤：底線式 */
+/* 行程／記帳頁籤：有色方框 */
 .tabs { gap: 4px; padding: 4px; background: var(--card-bg); border: 0; border-radius: var(--radius-md); }
 .tab-btn { padding: 9px; border-radius: var(--radius-sm); }
 .tab-btn:hover { color: var(--text); }
 .tab-btn.active { background: var(--primary); color: var(--on-primary); }
 
-/* 交通時間列（時間＋在地圖看路線）：整列放進一個有色方框，不再有左側線條 */
-.travel-row { margin: -3px 0 9px; padding: 8px 10px; background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+/* 交通時間列（時間＋在地圖看路線）：整列放進有色方框，縮排在上一個景點正下方，當作它的子項目 */
+.travel-row { margin: -2px 0 10px 24px; padding: 6px 10px; background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .travel-link, .travel-link-btn { background: var(--surface-muted); }
 
 /* 消費明細：每個日期（含當日小計）的標題列做成有色方框。
@@ -910,3 +910,41 @@ button:focus:not(:focus-visible) { outline: none; }
 @media (pointer: coarse) {
   .icon-btn { padding: 10px 11px; }
 }
+
+/* ================= v21p16：緊湊版面（減少四周留白，讓內容用滿畫面）=================
+   只調整間距與內容欄寬，配色不變。主內容欄寬 860→1100px；卡片、清單、彈出視窗的內距一併收小。 */
+.tabs { margin-bottom: 10px; }
+.breadcrumb { margin-bottom: 6px; }
+.day-selector-btn { padding: 10px 14px; margin-bottom: 10px; }
+.day-select-list { gap: 5px; }
+.day-select-item { padding: 9px 12px; }
+.spot-item { padding: 10px 12px; margin-bottom: 6px; }
+.expense-item { padding: 10px 12px; margin-bottom: 6px; }
+.content-block { margin-bottom: 9px; }
+.block-text { padding: 8px 12px; }
+.wish-item { padding: 9px 11px; margin-bottom: 6px; }
+.fx-status-card { padding: 10px 14px; margin-bottom: 8px; }
+.empty-hint { padding: 22px 12px; }
+.form-row { margin-bottom: 10px; }
+.form-actions { margin-top: 12px; }
+/* 消費明細的日期群組間距在 app.js 以 inline style 寫死，只能用 !important 覆寫 */
+#expense-list > div { margin-bottom: 10px !important; }
+#expense-list > div > div:first-child { margin-bottom: 4px !important; }
+
+/* 左側選單 */
+.menu-header { padding: 12px 14px; }
+#trip-list { padding: 6px; }
+#trip-list li { padding: 9px 10px; }
+.menu-footer { padding: 10px; }
+#new-trip-btn { margin: 0 10px 10px; width: calc(100% - 20px); }
+.menu-row { margin-top: 6px; }
+.settings-list { gap: 6px; margin-bottom: 10px; }
+.settings-item { padding: 10px 12px; }
+
+/* 彈出視窗與景點面板 */
+#modal-box { max-width: 560px; max-height: 94vh; max-height: 94dvh; padding: 14px 16px; }
+.modal-title { margin-bottom: 10px; }
+#spot-panel-box { top: 2vh; max-width: 1000px; }
+@media (min-width: 640px) { #spot-panel-box { top: 2vh; bottom: 2vh; } }
+#spot-panel-header { padding: 8px; }
+#spot-panel-content { padding: 4px 14px 20px; }

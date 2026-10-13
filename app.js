@@ -8,7 +8,7 @@ import {
   TRAVEL_ENABLED, TRAVEL_MODES, DAY_MODE_KEYS, SEGMENT_MODE_KEYS, BETA_MODES, BEST_WALK_MAX_SEC,
   validMode, endpointFor, directionsLink, transitWhen, computeRoute, computeBest,
   fmtDuration, fmtDistance, friendlyApiError, mountPlacePicker, placeTextSearch, parseMapUrlCoords,
-} from "./travel.js?v=21p14";
+} from "./travel.js?v=21p16";
 import {
   collection, doc, getDoc, getDocFromCache, getDocs,
   setDoc as rawSetDoc, updateDoc as rawUpdateDoc, deleteDoc as rawDeleteDoc,
